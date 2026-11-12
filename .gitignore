@@ -1,0 +1,13 @@
+# Windows build outputs and downloaded audio runtime
+*.exe
+*.dll
+*.syso
+/runtime/
+
+# Local tools, logs and editor files
+/.build-tools/
+*.log
+/.vscode/
+/.idea/
+Thumbs.db
+Desktop.ini
