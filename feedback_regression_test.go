@@ -124,9 +124,8 @@ func TestFocusedDotsReduceMonoTraceSpread(t *testing.T) {
 		s := newStereoPhosphorTestState(450, 450)
 		s.diffuseDots = diffuse
 		for i := 0; i < 2400; i++ {
-			s.addDotPoint(stereoPhosphorPoint{X: 225, Y: float32(60 + i%330)}, 1, uint64(i+1), 7)
+			s.exposeDot(stereoPhosphorPoint{X: 225, Y: float32(60 + i%330)}, 1)
 		}
-		s.flushDotBins()
 		var total, ms float64
 		for i, v := range s.energyLayers[0] {
 			d := float64(i%450) - 225

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"math"
 	"testing"
 )
@@ -22,7 +23,6 @@ func newStereoPhosphorTestState(width, height int) stereoPhosphorState {
 		state.energyLayers[i] = make([]float32, width*height)
 		state.coverageLayers[i] = make([]float32, width*height)
 	}
-	state.configureDotGrid()
 	return state
 }
 
@@ -126,14 +126,14 @@ func TestStereoLinePairsAnalysisTicksIntoDisplayExposure(t *testing.T) {
 
 	state := newStereoPhosphorTestState(1, 1)
 	state.moveToDisplayFrame(stereoLineDisplayFrame(1))
-	state.energyLayers[0][0] = 1
+	state.coverageLayers[0][0] = 1
 	state.moveToDisplayFrame(stereoLineDisplayFrame(2))
-	if state.energyLayers[0][0] != 1 || state.energyLayers[1][0] != 0 {
-		t.Fatal("second analysis tick rotated the current display exposure")
+	if state.coverageLayers[0][0] != 1 || state.highlightEnergy[0] != 0 {
+		t.Fatal("second tick aged the same exposure")
 	}
 	state.moveToDisplayFrame(stereoLineDisplayFrame(3))
-	if state.energyLayers[0][0] != 0 || math.Abs(float64(state.energyLayers[1][0]-stereoPhosphorHistoryInjection)) > 0.000001 {
-		t.Fatal("new display frame did not inject the completed exposure into phosphor history")
+	if state.coverageLayers[0][0] != 0 || state.highlightEnergy[0] <= 0 || state.highlightEnergy[0] > .25 {
+		t.Fatal("completed exposure must leave only faint afterglow")
 	}
 }
 
@@ -203,37 +203,31 @@ func TestStereoPhosphorTwoTickCoalescingKeepsFullDisplayExposure(t *testing.T) {
 	}
 }
 
-func TestStereoPhosphorAdvanceKeepsCurveAcrossDelayedBusySnapshot(t *testing.T) {
-	state := newStereoPhosphorTestState(96, 96)
-	// Mark the test surface as initialized so advance can exercise the geometry
-	// path without replacing the in-memory buffers with a Win32 DIB.
-	state.dc, state.bitmap = 1, 1
-	for i := 0; i < 48; i++ {
-		state.addRawPoint(stereoPhosphorVertex{
-			Position: stereoPhosphorPoint{X: 8 + float32(i), Y: 48 + float32(math.Sin(float64(i)*0.18))*10},
-			Energy:   0.5,
-		}, 2.5)
-	}
-	before := state.emittedControls
-	state.lastSequence, state.sequenceValid = 100, true
-	state.lastTick, state.tickValid = 1, true
-	state.lastDisplayFrame, state.displayFrameValid = 0, true
-	points := make([]StereoPoint, 80)
-	for i := range points {
-		switch i % 4 {
-		case 0:
-			points[i] = StereoPoint{X: -0.8, Y: -0.8}
-		case 1:
-			points[i] = StereoPoint{X: 0.8, Y: -0.8}
-		case 2:
-			points[i] = StereoPoint{X: 0.8, Y: 0.8}
-		default:
-			points[i] = StereoPoint{X: -0.8, Y: 0.8}
+func TestLineConnectsRecentSamplesAndDropsOldPath(t *testing.T) {
+	const size = 101
+	for _, rate := range []float32{22050, 24000, 48000, 96000} {
+		state := newStereoPhosphorTestState(size, size)
+		state.dc, state.bitmap = 1, 1
+		state.setLinePointRate(rate)
+		n := int(math.Ceil(float64(rate * stereoLineFreshWindowSec)))
+		pts := make([]StereoPoint, n+5)
+		pts[0] = StereoPoint{0, .7}
+		for i := 1; i < len(pts); i++ {
+			pts[i] = StereoPoint{-.5, .2}
 		}
-	}
-	ready, _ := state.advance(points, 180, 4, 0, 96, 96)
-	if !ready || state.emittedControls <= before {
-		t.Fatalf("delayed busy snapshot reset the curve: ready=%v controls %d->%d", ready, before, state.emittedControls)
+		pts[len(pts)-1] = StereoPoint{.5, .2}
+		state.advance(pts, uint64(len(pts)), 2, 0, size, size)
+		for _, q := range []struct {
+			pt      StereoPoint
+			visible bool
+		}{{StereoPoint{0, .2}, true}, {StereoPoint{0, .7}, false}} {
+			p := stereoPhosphorMapPoint(q.pt, 0, size, size)
+			i := int(math.Round(float64(p.Y)))*size + int(math.Round(float64(p.X)))
+			if (state.pixels[i*4+3] > 0) != q.visible {
+				t.Fatalf("rate %v at %v: alpha=%d", rate, q.pt, state.pixels[i*4+3])
+			}
+		}
+		state.stopRenderPool()
 	}
 }
 
@@ -469,31 +463,6 @@ func TestStereoPhosphorStyleInitialWindowsPreserveCurrentRanges(t *testing.T) {
 	}
 }
 
-func TestStereoPhosphorDotSplatDoesNotConnectSamples(t *testing.T) {
-	state := newStereoPhosphorTestState(41, 21)
-	state.splatFresh(stereoPhosphorPoint{X: 10, Y: 10}, 0.5, 1)
-	state.splatFresh(stereoPhosphorPoint{X: 30, Y: 10}, 0.5, 1)
-	coverage := state.coverageLayers[stereoPhosphorCurrentLayer]
-	if coverage[10*state.width+10] == 0 || coverage[10*state.width+30] == 0 {
-		t.Fatal("DOT endpoints were not rasterized")
-	}
-	if coverage[10*state.width+20] != 0 {
-		t.Fatal("DOT samples were joined by unintended coverage")
-	}
-}
-
-func TestStereoPhosphorDotUsesLargerParticleCoverage(t *testing.T) {
-	state := newStereoPhosphorTestState(21, 21)
-	state.splatFresh(stereoPhosphorPoint{X: 10, Y: 10}, 1, 1)
-	coverage := state.coverageLayers[stereoPhosphorCurrentLayer]
-	if coverage[10*state.width+12] == 0 {
-		t.Fatal("DOT particle did not reach two pixels from its center")
-	}
-	if coverage[10*state.width+13] != 0 {
-		t.Fatal("DOT particle exceeded its bounded radius")
-	}
-}
-
 func TestStereoPhosphorDotHistoryOutlastsLineHistory(t *testing.T) {
 	lineState := newStereoPhosphorTestState(1, 1)
 	dotState := newStereoPhosphorTestState(1, 1)
@@ -510,170 +479,76 @@ func TestStereoPhosphorDotHistoryOutlastsLineHistory(t *testing.T) {
 	}
 }
 
-func TestStereoPhosphorDotParticlesAreMultiScaleStableAndBounded(t *testing.T) {
-	var tiers [3]int
-	for sequence := uint64(1); sequence <= 4096; sequence++ {
-		offset, radius, energy := stereoPhosphorDotParticle(sequence, 450, 450, 1, false)
-		repeatedOffset, repeatedRadius, repeatedEnergy := stereoPhosphorDotParticle(sequence, 450, 450, 1, false)
-		if offset != repeatedOffset || radius != repeatedRadius || energy != repeatedEnergy {
-			t.Fatalf("DOT particle %d was not deterministic", sequence)
+func TestDotCloudDensityAndPosition(t *testing.T) {
+	for _, diffuse := range []bool{false, true} {
+		s := newStereoPhosphorTestState(201, 201)
+		s.diffuseDots = diffuse
+		a, b := stereoPhosphorPoint{40, 100}, stereoPhosphorPoint{160, 100}
+		s.exposeDot(a, 1)
+		for i := 0; i < 8; i++ {
+			s.exposeDot(b, 1)
 		}
-		distance := float32(math.Hypot(float64(offset.X), float64(offset.Y)))
-		switch {
-		case distance <= 5.001:
-			tiers[0]++
-		case distance <= 12.001:
-			tiers[1]++
-		case distance <= 18.001:
-			tiers[2]++
-		default:
-			t.Fatalf("DOT particle %d scatter radius = %.3f", sequence, distance)
+		if s.energyLayers[0][100*201+160] <= s.energyLayers[0][100*201+40] {
+			t.Fatal("repeated hits must brighten")
 		}
-		if radius < stereoPhosphorDotMinRadius || radius > stereoPhosphorDotMaxRadius {
-			t.Fatalf("DOT particle %d radius = %.3f", sequence, radius)
-		}
-		if energy < 0.90 || energy > 1.25 {
-			t.Fatalf("DOT particle %d energy = %.3f", sequence, energy)
-		}
-		haloOffset, haloRadius, haloEnergy := stereoPhosphorDotParticle(sequence, 450, 450, 16, true)
-		haloDistance := float32(math.Hypot(float64(haloOffset.X), float64(haloOffset.Y)))
-		if haloDistance < 9.999 || haloDistance > 22.001 || haloRadius < stereoPhosphorDotMinRadius || haloRadius > 1.951 || haloEnergy < 0.35 || haloEnergy > 0.65 {
-			t.Fatalf("DOT halo %d = distance %.3f radius %.3f energy %.3f", sequence, haloDistance, haloRadius, haloEnergy)
-		}
-	}
-	if tiers[0] < 700 || tiers[0] > 950 || tiers[1] < 2250 || tiers[1] > 2650 || tiers[2] < 700 || tiers[2] > 950 {
-		t.Fatalf("DOT scatter tiers = %v, want approximately 20/60/20 percent", tiers)
-	}
-}
-
-func TestStereoPhosphorDotDensityRaisesBrightnessWithoutSaturation(t *testing.T) {
-	_, _, sparse := stereoPhosphorDotParticle(99, 450, 450, 1, false)
-	_, _, dense := stereoPhosphorDotParticle(99, 450, 450, 64, false)
-	if dense <= sparse || dense > 1.25 {
-		t.Fatalf("DOT density energy = sparse %.3f dense %.3f", sparse, dense)
-	}
-}
-
-func TestStereoPhosphorDotGridAndParticleBudgetScaleWithCanvas(t *testing.T) {
-	if cell := stereoPhosphorDotCellSize(450, 450); cell != 8 {
-		t.Fatalf("450 px DOT cell = %d, want 8", cell)
-	}
-	if limit := stereoPhosphorDotParticleLimit(450, 450); limit != 145 {
-		t.Fatalf("450 px DOT particle limit = %d, want 145", limit)
-	}
-	if stereoPhosphorDotCellSize(100, 100) != 6 || stereoPhosphorDotCellSize(1000, 1000) != 10 {
-		t.Fatal("DOT cell size did not respect 6..10 px bounds")
-	}
-	if stereoPhosphorDotParticleLimit(100, 100) != 80 || stereoPhosphorDotParticleLimit(1000, 1000) != 180 {
-		t.Fatal("DOT particle budget did not respect 80..180 bounds")
-	}
-}
-
-func TestStereoPhosphorDotFlushIsBoundedAndClearsDensityState(t *testing.T) {
-	state := newStereoPhosphorTestState(450, 450)
-	sequence := uint64(0)
-	for y := state.dotCellSize / 2; y < state.height; y += state.dotCellSize {
-		for x := state.dotCellSize / 2; x < state.width; x += state.dotCellSize {
-			sequence++
-			state.addDotPoint(stereoPhosphorPoint{X: float32(x), Y: float32(y)}, 1, sequence, 7)
-		}
-	}
-	emitted := state.flushDotBins()
-	if emitted <= 0 || emitted > stereoPhosphorDotParticleLimit(state.width, state.height) {
-		t.Fatalf("DOT emitted %d particles", emitted)
-	}
-	if len(state.dotActive) != 0 || state.dotFrameValid {
-		t.Fatal("DOT density state survived its frame flush")
-	}
-	for _, bin := range state.dotBins {
-		if bin.Hits != 0 {
-			t.Fatal("DOT density bin survived its frame flush")
-		}
-	}
-}
-
-func TestStereoPhosphorDotDensityIsIndependentOfSampleOrder(t *testing.T) {
-	type sample struct {
-		point    stereoPhosphorPoint
-		sequence uint64
-	}
-	samples := make([]sample, 0, 96)
-	for i := 0; i < 96; i++ {
-		samples = append(samples, sample{
-			point:    stereoPhosphorPoint{X: float32(80 + (i*17)%260), Y: float32(90 + (i*29)%240)},
-			sequence: uint64(i + 1),
-		})
-	}
-	forward := newStereoPhosphorTestState(450, 450)
-	reverse := newStereoPhosphorTestState(450, 450)
-	for _, sample := range samples {
-		forward.addDotPoint(sample.point, 1, sample.sequence, 3)
-	}
-	for i := len(samples) - 1; i >= 0; i-- {
-		reverse.addDotPoint(samples[i].point, 1, samples[i].sequence, 3)
-	}
-	if forward.flushDotBins() != reverse.flushDotBins() {
-		t.Fatal("DOT sample order changed the particle count")
-	}
-	for i := range forward.energyLayers[0] {
-		if math.Abs(float64(forward.energyLayers[0][i]-reverse.energyLayers[0][i])) > 0.000001 ||
-			math.Abs(float64(forward.coverageLayers[0][i]-reverse.coverageLayers[0][i])) > 0.000001 {
-			t.Fatalf("DOT sample order changed pixel %d", i)
-		}
-	}
-}
-
-func TestStereoPhosphorDotDensityBreaksContinuousSampleTrack(t *testing.T) {
-	state := newStereoPhosphorTestState(450, 450)
-	sequence := uint64(0)
-	for x := 50; x <= 400; x++ {
-		sequence++
-		state.addDotPoint(stereoPhosphorPoint{X: float32(x), Y: 225}, 1, sequence, 11)
-	}
-	emitted := state.flushDotBins()
-	if emitted < 40 {
-		t.Fatalf("DOT line produced only %d cloud particles", emitted)
-	}
-	coverage := state.coverageLayers[stereoPhosphorCurrentLayer]
-	longest, run := 0, 0
-	spreadPixels := 0
-	for x := 40; x <= 410; x++ {
-		if coverage[225*state.width+x] > 0 {
-			run++
-			if run > longest {
-				longest = run
-			}
-		} else {
-			run = 0
-		}
-		for y := 205; y <= 245; y++ {
-			if absInt(y-225) >= 5 && coverage[y*state.width+x] > 0 {
-				spreadPixels++
+		for i, v := range s.energyLayers[0] {
+			if v > 0 && (absInt(i/201-100) > 3 || min(absInt(i%201-40), absInt(i%201-160)) > 3) {
+				t.Fatalf("unexpected exposure at %d", i)
 			}
 		}
 	}
-	if longest > 12 {
-		t.Fatalf("DOT retained a %d px continuous centerline", longest)
-	}
-	if spreadPixels < 80 {
-		t.Fatalf("DOT cloud spread covered only %d off-track pixels", spreadPixels)
+}
+
+func TestDotCloudSilenceClears(t *testing.T) {
+	for _, diffuse := range []bool{false, true} {
+		s := newStereoPhosphorTestState(101, 101)
+		s.diffuseDots = diffuse
+		s.dc, s.bitmap = 1, 1
+		s.advanceStyle([]StereoPoint{{0, .5}}, 1, 2, 0, 1, 101, 101)
+		if !s.surfaceActive {
+			t.Fatal("missing particle")
+		}
+		for tick := uint64(3); tick < 66; tick++ {
+			s.advanceStyle([]StereoPoint{{}}, tick-1, tick, 0, 1, 101, 101)
+		}
+		for i := 3; i < len(s.pixels); i += 4 {
+			if s.pixels[i] != 0 {
+				t.Fatalf("silence produced a visible pixel at %d", i/4)
+			}
+		}
+		s.stopRenderPool()
 	}
 }
 
-func TestStereoPhosphorDotResetClearsPendingDensity(t *testing.T) {
-	state := newStereoPhosphorTestState(101, 101)
-	state.addDotPoint(stereoPhosphorPoint{X: 50, Y: 50}, 1, 1, 0)
-	if len(state.dotActive) != 1 || !state.dotFrameValid {
-		t.Fatal("DOT test did not create pending density")
-	}
-	state.reset()
-	if len(state.dotActive) != 0 || state.dotFrameValid {
-		t.Fatal("DOT reset retained pending density")
-	}
-	for _, bin := range state.dotBins {
-		if bin.Hits != 0 {
-			t.Fatal("DOT reset retained a populated density bin")
+func TestDotCloudPreservesPhaseAxes(t *testing.T) {
+	for _, anti := range []bool{false, true} {
+		s := newStereoPhosphorTestState(201, 201)
+		s.dc, s.bitmap = 1, 1
+		var pts [128]StereoPoint
+		for i := range pts {
+			v := float32(.6 * math.Sin(float64(i)*.25))
+			if anti {
+				pts[i].X = v
+			} else {
+				pts[i].Y = v
+			}
 		}
+		s.advanceStyle(pts[:], 128, 2, 0, 1, 201, 201)
+		span, width := 0, 0
+		for i, e := range s.energyLayers[0] {
+			if e < .01 {
+				continue
+			}
+			x, y := absInt(i%201-100), absInt(i/201-100)
+			if anti {
+				x, y = y, x
+			}
+			width, span = max(width, x), max(span, y)
+		}
+		if width > 3 || span < 55 {
+			t.Fatalf("anti=%v: half-width=%d half-span=%d", anti, width, span)
+		}
+		s.stopRenderPool()
 	}
 }
 
@@ -688,9 +563,6 @@ func TestStereoPhosphorDotCoalescedTickCommitsBothDensityFrames(t *testing.T) {
 	if _, composed := state.advanceStyle(second, uint64(len(first)+len(second)), 3, 0, 1, 101, 101); !composed {
 		t.Fatal("coalesced DOT tick did not compose")
 	}
-	if state.dotFrameValid || len(state.dotActive) != 0 {
-		t.Fatal("coalesced DOT compose left density pending")
-	}
 	currentEnergy, historyEnergy := float32(0), float32(0)
 	for i := range state.energyLayers[0] {
 		currentEnergy += state.energyLayers[stereoPhosphorCurrentLayer][i]
@@ -698,15 +570,6 @@ func TestStereoPhosphorDotCoalescedTickCommitsBothDensityFrames(t *testing.T) {
 	}
 	if currentEnergy <= 0 || historyEnergy <= 0 {
 		t.Fatalf("coalesced DOT frames = current %.3f history %.3f", currentEnergy, historyEnergy)
-	}
-}
-
-func TestStereoPhosphorPointSequenceTracksAbsoluteSamples(t *testing.T) {
-	if got := stereoPhosphorPointSequence(960, 960, 60); got != 61 {
-		t.Fatalf("first retained sequence = %d, want 61", got)
-	}
-	if got := stereoPhosphorPointSequence(1200, 240, 239); got != 1200 {
-		t.Fatalf("newest sequence = %d, want 1200", got)
 	}
 }
 
@@ -1055,7 +918,7 @@ func TestStereoPhosphorSevenPointFilterPreservesStraightGeometry(t *testing.T) {
 	impulse := [7]stereoPhosphorVertex{}
 	impulse[3].Position.Y = 1
 	filtered = stereoPhosphorFilteredPoint(impulse)
-	if math.Abs(float64(filtered.Position.Y-20.0/64.0)) > 0.0001 {
+	if math.Abs(float64(filtered.Position.Y-(0.85+0.15*20.0/64.0))) > 0.0001 {
 		t.Fatalf("seven-point impulse response = %.6f", filtered.Position.Y)
 	}
 }
@@ -1161,24 +1024,48 @@ func TestStereoPhosphorFlushCompletesTailOnce(t *testing.T) {
 	}
 }
 
-func TestStereoPhosphorNewInputStartsFreshChainAfterTailFlush(t *testing.T) {
-	state := newStereoPhosphorTestState(96, 64)
-	for i := 0; i < 20; i++ {
-		state.addRawPoint(stereoPhosphorVertex{
-			Position:  stereoPhosphorPoint{X: 8 + float32(i)*3, Y: 30},
-			Energy:    0.5,
-			Freshness: 1,
-		}, 2.5)
+func TestLineExposureAfterSilenceMatchesFreshInput(t *testing.T) {
+	const size = 96
+	for _, pause := range [][]StereoPoint{nil, {{0, 0}, {0, 0}}} {
+		state := newStereoPhosphorTestState(size, size)
+		fresh := newStereoPhosphorTestState(size, size)
+		state.dc, state.bitmap, fresh.dc, fresh.bitmap = 1, 1, 1, 1
+		state.advance([]StereoPoint{{-.6, 0}}, 1, 1, 0, size, size)
+		state.advance(pause, 1+uint64(len(pause)), 2, 0, size, size)
+		resume := []StereoPoint{{.6, 0}}
+		state.advance(resume, 2+uint64(len(pause)), 4, 0, size, size)
+		fresh.advance(resume, 1, 4, 0, size, size)
+		for i, e := range fresh.coverageLayers[0] {
+			if e != state.coverageLayers[0][i] {
+				t.Fatalf("resumed exposure differs at %d: %v vs %v", i, e, state.coverageLayers[0][i])
+			}
+		}
+		state.stopRenderPool()
+		fresh.stopRenderPool()
 	}
-	state.flushCurveTail(2.5)
-	state.dc, state.bitmap = 1, 1
-	state.lastSequence, state.sequenceValid = 100, true
-	state.lastTick, state.tickValid = 2, true
-	state.lastDisplayFrame, state.displayFrameValid = 0, true
-	points := []StereoPoint{{X: 0.1, Y: 0.2}, {X: 0.15, Y: 0.25}}
-	state.advance(points, 102, 3, 0, 96, 64)
-	if state.tailFlushed || state.rawCount == 0 {
-		t.Fatalf("resumed input did not start a fresh chain: flushed=%v raw=%d", state.tailFlushed, state.rawCount)
+}
+
+func TestLineRetracingDoesNotAccumulateAndAfterglowFades(t *testing.T) {
+	const size = 96
+	s := newStereoPhosphorTestState(size, size)
+	s.dc, s.bitmap = 1, 1
+	defer s.stopRenderPool()
+	sample := StereoPoint{.3, .25}
+	mapped := stereoPhosphorMapPoint(sample, 0, size, size)
+	i := int(math.Round(float64(mapped.Y)))*size + int(math.Round(float64(mapped.X)))
+	s.setLinePointRate(24000)
+	s.advance([]StereoPoint{sample}, 1, 2, 0, size, size)
+	once := s.pixels[i*4+3]
+	s.advance([]StereoPoint{sample, sample, sample, sample, sample, sample, sample, sample}, 9, 4, 0, size, size)
+	repeated := s.pixels[i*4+3]
+	s.advance(nil, 9, 6, 0, size, size)
+	tail := s.pixels[i*4+3]
+	for tick := uint64(8); tick <= 60; tick += 2 {
+		s.advance(nil, 9, tick, 0, size, size)
+	}
+	faded := s.pixels[i*4+3]
+	if !(once > 0 && repeated == once && tail > 0 && tail < once/3 && faded == 0) {
+		t.Fatalf("pixel alpha: single=%d repeated=%d after silence=%d", once, repeated, faded)
 	}
 }
 
@@ -1506,54 +1393,22 @@ func TestStereoLineLowpassTracksGestureAndResetBreaksChain(t *testing.T) {
 	}
 }
 
-func TestStereoLineLowpassDefaults(t *testing.T) {
-	if stereoLineLowpassHz != 30 {
-		t.Fatalf("low-pass cutoff default = %v, want 30", stereoLineLowpassHz)
+func TestLineWindowIndependentOfBatchSplit(t *testing.T) {
+	pts := make([]StereoPoint, 200)
+	for i := range pts {
+		pts[i] = StereoPoint{float32(i) / 500, .25}
 	}
-}
-
-func TestStereoLineFreshnessIsTimeBasedAcrossBatches(t *testing.T) {
-	restoreWindow := stereoLineFreshWindowSec
-	defer func() { stereoLineFreshWindowSec = restoreWindow }()
-	stereoLineFreshWindowSec = 0.08
-	state := &stereoPhosphorState{}
-	state.setLinePointRate(22050)
-	// Two consecutive 120 Hz batches. With the legacy per-batch ramp the seam
-	// between the newest point of batch one (1.0) and the oldest point of
-	// batch two (~0.12) was a hard brightness step; time-based aging must keep
-	// the seam nearly continuous.
-	points := make([]StereoPoint, 184)
-	for i := range points {
-		points[i] = StereoPoint{X: float32(i) * 0.001, Y: 0.2}
+	run := func(split int) []byte {
+		s := newStereoPhosphorTestState(101, 101)
+		s.dc, s.bitmap = 1, 1
+		s.setLinePointRate(24000)
+		s.advance(pts[:split], uint64(split), 1, 0, 101, 101)
+		s.advance(pts[split:], 200, 2, 0, 101, 101)
+		s.stopRenderPool()
+		return s.pixels
 	}
-	state.advanceStyle(points, 184, 1, 0, 0, 96, 96)
-	state.advanceStyle(points, 368, 2, 0, 0, 96, 96)
-	// Walk the freshness assignment directly through the same code path: the
-	// newest point of the first batch and the oldest point of the second batch
-	// are one tick (184 points) apart in age, so their freshness must differ
-	// by less than 0.2 instead of the legacy 0.88 jump.
-	window := stereoLineFreshWindowSec
-	rate := float32(22050)
-	freshAt := func(agePoints uint64) float32 {
-		age := float32(agePoints) / (rate * window)
-		if age > 1 {
-			age = 1
-		}
-		return 0.12 + 0.88*(1-age)*(1-age)
-	}
-	seam := freshAt(0) - freshAt(184)
-	if seam > 0.2 {
-		t.Fatalf("freshness seam across batches = %v, want < 0.2", seam)
-	}
-	// And points near the window edge must still ramp down to the floor.
-	if freshAt(1600) >= 0.2 {
-		t.Fatalf("aged freshness = %v, want near the 0.12 floor", freshAt(1600))
-	}
-}
-
-func TestStereoLineFreshnessFallsBackWithoutRate(t *testing.T) {
-	if stereoPhosphorAgeEnergy(0, 4) >= stereoPhosphorAgeEnergy(3, 4) {
-		t.Fatal("legacy per-batch ramp must remain monotonic for the rate-less fallback")
+	if !bytes.Equal(run(20), run(180)) {
+		t.Fatal("same stream rendered differently across callback boundaries")
 	}
 }
 

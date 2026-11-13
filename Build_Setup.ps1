@@ -22,10 +22,17 @@ try {
     & $Compiler '/Qp' "/DAppVersion=$version" "/DPayload=$($payload.FullName)" "/O$($payload.FullName)" "$PSScriptRoot\installer\AuraluxPlayer.iss"
     if ($LASTEXITCODE) { throw 'Inno Setup failed.' }
     $name = "AuraluxPlayer-$version-windows-x64-setup.exe"
-    Copy-Item -LiteralPath (Join-Path $payload.FullName $name) -Destination (Join-Path $out $name) -Force
-    $hash = (Get-FileHash -LiteralPath (Join-Path $out $name)).Hash.ToLowerInvariant()
-    [IO.File]::WriteAllText((Join-Path $out "$name.sha256"), "$hash  $name" + [Environment]::NewLine)
-    Write-Output (Join-Path $out $name)
+    $built = Join-Path $payload.FullName $name
+    $destination = Join-Path $out $name
+    $expected = (Get-FileHash -LiteralPath $built -Algorithm SHA256).Hash
+    Copy-Item -LiteralPath $built -Destination $destination -Force
+    if ((Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash -ne $expected) {
+        throw "SHA-256 verification failed: $destination"
+    }
+    $oldChecksum = "$destination.sha256"
+    if (Test-Path -LiteralPath $oldChecksum -PathType Leaf) { Remove-Item -LiteralPath $oldChecksum }
+    Write-Host "Verified SHA-256: $expected"
+    Write-Output $destination
 } finally {
     Pop-Location
     if (Test-Path -LiteralPath $exe) { Remove-Item -LiteralPath $exe }

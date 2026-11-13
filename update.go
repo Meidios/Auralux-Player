@@ -20,7 +20,7 @@ import (
 	"time"
 )
 
-const appVersion = "1.5.86"
+const appVersion = "1.5.92"
 const projectURL = "https://github.com/Meidios/Auralux-Player"
 const releasesURL = projectURL + "/releases"
 const latestAPI = "https://api.github.com/repos/Meidios/Auralux-Player/releases/latest"

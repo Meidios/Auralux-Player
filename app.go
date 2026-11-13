@@ -47,15 +47,15 @@ type LoudnessSample struct {
 }
 
 type Layout struct {
-	Client, Header, Content, Playlist, FileInfo, Center, Right, MetricStrip, Wave, Loudness, Spectrum, Meter, Stereo, VU, Controls        RECT
-	ThemeBtn                                                                                                                              RECT
-	Loudness5Btn, Loudness15Btn, Loudness30Btn, Loudness60Btn, LoudnessFullBtn, LoudnessTargetBtn                                         RECT
-	WaveZoomOutBtn, WaveFitBtn, WaveZoomInBtn                                                                                             RECT
-	AnalyzerViewBtn, SpectrumFFTBtn, SpectrumSmoothBtn, SpectrumTiltBtn, SpectrumBandBtn, SpectrumHoldBtn, SpectrumFreezeBtn              RECT
-	SpectrogramScaleBtn, SpectrogramTimeBtn, SpectrogramRangeBtn, SpectrogramFreezeBtn, StereoModeBtn, StereoStyleBtn, StereoNormalizeBtn RECT
-	PlaylistSelector, OpenBtn, ClearPlaylistBtn, PrevBtn, PlayBtn, StopBtn, NextBtn, LoopBtn, PlayModeBtn, ResetBtn, DeviceBtn, InputBtn  RECT
-	Progress, Volume, Speaker, FileInfoCopyBtn, FileInfoFolderBtn, FileInfoPath, PlaylistScrollTrack, PlaylistScrollThumb                 RECT
-	SplitPlaylist, SplitRight, SplitPlaylistInfo, SplitLoudnessSpectrum, SplitMeterStereo                                                 RECT
+	Client, Header, Content, Playlist, FileInfo, Center, Right, MetricStrip, Wave, Loudness, Spectrum, Meter, Stereo, VU, Controls                        RECT
+	ThemeBtn                                                                                                                                              RECT
+	Loudness5Btn, Loudness15Btn, Loudness30Btn, Loudness60Btn, LoudnessFullBtn, LoudnessTargetBtn                                                         RECT
+	WaveZoomOutBtn, WaveFitBtn, WaveZoomInBtn                                                                                                             RECT
+	AnalyzerViewBtn, SpectrumFFTBtn, SpectrumSmoothBtn, SpectrumTiltBtn, SpectrumBandBtn, SpectrumHoldBtn, SpectrumFreezeBtn                              RECT
+	SpectrogramScaleBtn, SpectrogramTimeBtn, SpectrogramRangeBtn, SpectrogramFreezeBtn, StereoModeBtn, StereoStyleBtn, StereoNormalizeBtn, StereoColorBtn RECT
+	PlaylistSelector, OpenBtn, ClearPlaylistBtn, PrevBtn, PlayBtn, StopBtn, NextBtn, LoopBtn, PlayModeBtn, ResetBtn, DeviceBtn, InputBtn                  RECT
+	Progress, Volume, Speaker, FileInfoCopyBtn, FileInfoFolderBtn, FileInfoPath, PlaylistScrollTrack, PlaylistScrollThumb                                 RECT
+	SplitPlaylist, SplitRight, SplitPlaylistInfo, SplitLoudnessSpectrum, SplitMeterStereo                                                                 RECT
 }
 
 const (
@@ -196,7 +196,6 @@ type App struct {
 	stereoSequence                                 uint64
 	stereoPhosphor                                 stereoPhosphorState
 	stereoLineFadeUntil                            uint64
-	polarEnvelope                                  [128]float32
 	correlation, correlationDisplay                float32
 	tickCount                                      uint64
 	wasPlaying                                     bool
@@ -647,6 +646,7 @@ type layoutConfig struct {
 	StereoMode            int     `json:"stereo_mode"`
 	DiffuseDots           bool    `json:"diffuse_dots,omitempty"`
 	StereoStyle           int     `json:"stereo_style,omitempty"`
+	StereoBlue            bool    `json:"stereo_blue,omitempty"`
 	StereoNormalize       bool    `json:"stereo_normalize,omitempty"`
 	ContinuousPlay        bool    `json:"continuous_play"`
 	OutputBackend         int     `json:"output_backend,omitempty"`
@@ -775,6 +775,7 @@ func (a *App) loadLayoutConfig() {
 	if cfg.StereoMode >= 0 && cfg.StereoMode <= 2 {
 		a.stereoMode = cfg.StereoMode
 	}
+	a.stereoPhosphor.blue = cfg.StereoBlue
 	a.stereoPhosphor.diffuseDots = cfg.DiffuseDots
 	if cfg.StereoStyle >= 0 && cfg.StereoStyle <= 2 {
 		a.stereoStyle = cfg.StereoStyle
@@ -817,7 +818,7 @@ func (a *App) saveLayoutConfig() {
 		SpectrumFFT: a.spectrumFFT, SpectrumSmoothing: a.spectrumSmoothing, SpectrumTilt: a.spectrumTilt, SpectrumBandMode: a.spectrumBandMode,
 		AnalyzerView: int(view), SpectrogramTimeWindow: a.spectrogramTimeWindow, SpectrogramRange: a.spectrogramRange,
 		SpectrogramScale: int(a.spectrogramScale), SpectrogramFreqMin: a.spectrogramFreqMin, SpectrogramFreqMax: a.spectrogramFreqMax,
-		StereoMode: a.stereoMode, StereoStyle: a.stereoStyle, DiffuseDots: a.stereoPhosphor.diffuseDots, StereoNormalize: a.stereoNormalize, ContinuousPlay: a.continuousPlay,
+		StereoMode: a.stereoMode, StereoStyle: a.stereoStyle, StereoBlue: a.stereoPhosphor.blue, DiffuseDots: a.stereoPhosphor.diffuseDots, StereoNormalize: a.stereoNormalize, ContinuousPlay: a.continuousPlay,
 		OutputBackend: a.outputBackend, OutputDeviceName: a.outputDeviceName,
 		WindowX: a.windowX, WindowY: a.windowY, WindowWidth: a.windowW, WindowHeight: a.windowH, WindowMaximized: a.windowMaximized,
 	}
@@ -1424,21 +1425,14 @@ func (a *App) onTick(renderTick uint64) {
 		}
 		if stereoLineFadeRunning(renderTick, a.stereoLineFadeUntil) {
 			stereoFading = true
-			// POLAR + LINE retains its envelope renderer. Every phosphor-backed
-			// style advances an empty exposure so its existing image decays.
-			if a.stereoStyle != 0 || a.stereoMode != 2 {
-				_, width, height, valid := stereoLineGeometry(a.layout.Stereo, a.currentDPI())
-				if valid {
-					_, stereoComposed = a.stereoPhosphor.advanceStyle(nil, a.stereoSequence, renderTick, a.stereoMode, a.stereoStyle, width, height)
-				}
+			_, width, height, valid := stereoLineGeometry(a.layout.Stereo, a.currentDPI())
+			if valid {
+				_, stereoComposed = a.stereoPhosphor.advanceStyle(nil, a.stereoSequence, renderTick, a.stereoMode, a.stereoStyle, width, height)
 			}
 		} else {
 			stereoFadeFinished = a.stereoLineFadeUntil != 0
 			a.stereoLineFadeUntil = 0
 			a.stereoPhosphor.reset()
-			for i := range a.polarEnvelope {
-				a.polarEnvelope[i] = 0
-			}
 		}
 		a.correlation = 0
 		a.correlationDisplay = 0
@@ -1505,15 +1499,13 @@ func (a *App) onTick(renderTick uint64) {
 		// compose the full-size blurred DIB only every second tick. WM_PAINT then
 		// performs only AlphaBlend, which keeps phosphor-backed output evenly paced
 		// at 60 fps without putting the full pixel pass on every repaint.
-		if a.stereoStyle != 0 || a.stereoMode != 2 {
-			_, width, height, valid := stereoLineGeometry(a.layout.Stereo, a.currentDPI())
-			if valid {
-				// The LINE gesture low-pass needs the real collection cadence:
-				// stereo points are taken every second audio frame (frameStep 2).
-				rate, _ := a.engine.AnalysisInfo()
-				a.stereoPhosphor.setLinePointRate(float32(rate) * 0.5)
-				_, stereoComposed = a.stereoPhosphor.advanceStyle(a.stereoPoints[:a.stereoPointCount], a.stereoSequence, renderTick, a.stereoMode, a.stereoStyle, width, height)
-			}
+		_, width, height, valid := stereoLineGeometry(a.layout.Stereo, a.currentDPI())
+		if valid {
+			// LINE ages the trace using the real collection cadence:
+			// stereo points are taken every second audio frame (frameStep 2).
+			rate, _ := a.engine.AnalysisInfo()
+			a.stereoPhosphor.setLinePointRate(float32(rate) * 0.5)
+			_, stereoComposed = a.stereoPhosphor.advanceStyle(a.stereoPoints[:a.stereoPointCount], a.stereoSequence, renderTick, a.stereoMode, a.stereoStyle, width, height)
 		}
 	}
 
@@ -1533,9 +1525,7 @@ func (a *App) onTick(renderTick uint64) {
 	}
 
 	if analysisActive {
-		// Phosphor-backed styles are composed at 60 fps. POLAR + LINE retains its
-		// lightweight envelope renderer and therefore follows the analysis cadence.
-		if (a.stereoStyle == 0 && a.stereoMode == 2) || stereoComposed {
+		if stereoComposed {
 			a.invalidateDynamic(dirtyStereo, a.layout.Stereo)
 		}
 		if a.tickCount%2 == 0 {
@@ -1562,7 +1552,7 @@ func (a *App) onTick(renderTick uint64) {
 			a.invalidateDynamic(dirtyMeter, a.layout.Meter)
 		}
 	} else if stereoFading {
-		if (a.stereoStyle == 0 && a.stereoMode == 2) || stereoComposed {
+		if stereoComposed {
 			a.invalidateDynamic(dirtyStereo, a.layout.Stereo)
 		}
 		if stateChanged || analysisStateChanged {
@@ -2249,18 +2239,12 @@ func (a *App) toggleSpectrumMode(requested spectrumDisplayMode) {
 func (a *App) cycleStereoMode() {
 	a.stereoMode = (a.stereoMode + 1) % 3
 	a.stereoPhosphor.reset()
-	for i := range a.polarEnvelope {
-		a.polarEnvelope[i] = 0
-	}
 	a.saveLayoutConfig()
 }
 
 func (a *App) cycleStereoStyle() {
 	a.stereoStyle = (a.stereoStyle + 1) % 3
 	a.stereoPhosphor.reset()
-	for i := range a.polarEnvelope {
-		a.polarEnvelope[i] = 0
-	}
 	a.saveLayoutConfig()
 	a.invalidateDynamic(dirtyStereo, a.layout.Stereo)
 }
@@ -2269,9 +2253,6 @@ func (a *App) toggleStereoNormalize() {
 	a.stereoNormalize = !a.stereoNormalize
 	a.stereoNormalizeGain = 1
 	a.stereoPhosphor.reset()
-	for i := range a.polarEnvelope {
-		a.polarEnvelope[i] = 0
-	}
 	a.saveLayoutConfig()
 	a.invalidateDynamic(dirtyStereo, a.layout.Stereo)
 }
@@ -3224,6 +3205,13 @@ func (a *App) onMouseDown(x, y int32) {
 		a.cycleStereoMode()
 	case pointInRect(x, y, l.StereoStyleBtn):
 		a.cycleStereoStyle()
+	case pointInRect(x, y, l.StereoColorBtn):
+		a.stereoPhosphor.blue = !a.stereoPhosphor.blue
+		if a.stereoPhosphor.composedFrameValid && !a.stereoPhosphor.composedBlank {
+			a.stereoPhosphor.renderStereoColors()
+		}
+		a.saveLayoutConfig()
+		a.invalidateDynamic(dirtyStereo, a.layout.Stereo)
 	case pointInRect(x, y, l.StereoNormalizeBtn):
 		a.toggleStereoNormalize()
 	case pointInRect(x, y, l.WaveZoomOutBtn):
@@ -4351,9 +4339,6 @@ func (a *App) resetLiveAnalysisView() {
 	a.stereoNormalizeGain = 1
 	a.stereoPhosphor.reset()
 	a.correlation, a.correlationDisplay = 0, 0
-	for i := range a.polarEnvelope {
-		a.polarEnvelope[i] = 0
-	}
 	a.resetLiveWaveform()
 	a.resetSpectrumState()
 	a.resetLiveSpectrogram()

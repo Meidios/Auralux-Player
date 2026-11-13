@@ -16,48 +16,49 @@ import (
 )
 
 var (
-	cBG             uint32
-	cHeader         uint32
-	cPanel          uint32
-	cPanel2         uint32
-	cPanel3         uint32
-	cBorder         uint32
-	cGrid           uint32
-	cGridStrong     uint32
-	cText           uint32
-	cMuted          uint32
-	cFaint          uint32
-	cAccent         uint32
-	cAccent2        uint32
-	cReady          uint32
-	cBlueDark       uint32
-	cSpecFill       uint32
-	cSpecLine       uint32
-	cSpecTrace      uint32
-	cWarn           uint32
-	cDanger         uint32
-	cSurfaceDeep    uint32
-	cSurfaceAlt     uint32
-	cSurfaceRaised  uint32
-	cWaveInactive   uint32
-	cClipGuide      uint32
-	cSpecShadow     uint32
-	cVUGreenOn      uint32
-	cVUGreenOff     uint32
-	cVUYellowOff    uint32
-	cVURedOff       uint32
-	cVUHighlight    uint32
-	cSplitterLine   uint32
-	cSplitterHover  uint32
-	cCorrelationNeg uint32
-	cCorrelationPos uint32
-	cTargetZone     uint32
-	cHistoryOutline uint32
-	cStereoTrail    uint32
-	cStereoLine     uint32
-	cStereoCore     uint32
-	cStereoPeak     uint32
-	cStereoFill     uint32
+	cBG                uint32
+	cHeader            uint32
+	cPanel             uint32
+	cPanel2            uint32
+	cPanel3            uint32
+	cBorder            uint32
+	cGrid              uint32
+	cGridStrong        uint32
+	cText              uint32
+	cMuted             uint32
+	cFaint             uint32
+	cAccent            uint32
+	cAccent2           uint32
+	cReady             uint32
+	cBlueDark          uint32
+	cSpecFill          uint32
+	cSpecLine          uint32
+	cSpecTrace         uint32
+	cWarn              uint32
+	cDanger            uint32
+	cSurfaceDeep       uint32
+	cSurfaceAlt        uint32
+	cSurfaceRaised     uint32
+	cWaveInactive      uint32
+	cClipGuide         uint32
+	cSpecShadow        uint32
+	cVUGreenOn         uint32
+	cVUGreenOff        uint32
+	cVUYellowOff       uint32
+	cVURedOff          uint32
+	cVUHighlight       uint32
+	cSplitterLine      uint32
+	cSplitterHover     uint32
+	cCorrelationNeg    uint32
+	cCorrelationPos    uint32
+	cTargetZone        uint32
+	cHistoryOutline    uint32
+	cStereoTrail       uint32
+	cStereoLine        uint32
+	cStereoCore        uint32
+	cStereoPeak        uint32
+	cStereoGoldPalette = [4]uint32{rgb(150, 51, 16), rgb(238, 92, 14), rgb(255, 160, 18), rgb(255, 228, 79)}
+	cStereoFill        uint32
 )
 
 func setTheme(mode int) {
@@ -102,6 +103,7 @@ func setTheme(mode int) {
 		cCorrelationPos = rgb(31, 139, 88)
 		cTargetZone = rgb(218, 232, 243)
 		cHistoryOutline = rgb(248, 250, 252)
+		cStereoGoldPalette = [4]uint32{rgb(166, 83, 47), rgb(189, 71, 9), rgb(174, 81, 0), rgb(125, 53, 0)}
 		cStereoTrail = rgb(145, 190, 207)
 		cStereoLine = rgb(61, 145, 177)
 		cStereoCore = rgb(24, 119, 163)
@@ -147,6 +149,7 @@ func setTheme(mode int) {
 	cCorrelationPos = rgb(54, 180, 113)
 	cTargetZone = rgb(31, 39, 46)
 	cHistoryOutline = rgb(10, 10, 12)
+	cStereoGoldPalette = [4]uint32{rgb(150, 51, 16), rgb(238, 92, 14), rgb(255, 160, 18), rgb(255, 228, 79)}
 	cStereoTrail = rgb(38, 88, 105)
 	cStereoLine = rgb(60, 153, 181)
 	cStereoCore = rgb(116, 218, 238)
@@ -506,9 +509,17 @@ func (a *App) calculateLayout(c RECT) Layout {
 	if rectW(l.Stereo) < 290 {
 		modeW, styleW, normalizeW = 56, 44, 50
 	}
-	l.StereoModeBtn = makeRect(l.Stereo.Right-12-modeW, l.Stereo.Top+5, modeW, 22)
-	l.StereoStyleBtn = makeRect(l.StereoModeBtn.Left-6-styleW, l.Stereo.Top+5, styleW, 22)
-	l.StereoNormalizeBtn = makeRect(l.StereoStyleBtn.Left-6-normalizeW, l.Stereo.Top+5, normalizeW, 22)
+	colorW, gap, inset := int32(42), int32(6), int32(12)
+	if rectW(l.Stereo) < 240 {
+		modeW, styleW, normalizeW, colorW, gap, inset = 48, 36, 42, 37, 4, 5
+	}
+	if rectW(l.Stereo) < 190 {
+		modeW, styleW, normalizeW, colorW, gap, inset = 40, 30, 36, 32, 3, 4
+	}
+	l.StereoModeBtn = makeRect(l.Stereo.Right-inset-modeW, l.Stereo.Top+5, modeW, 22)
+	l.StereoStyleBtn = makeRect(l.StereoModeBtn.Left-gap-styleW, l.Stereo.Top+5, styleW, 22)
+	l.StereoNormalizeBtn = makeRect(l.StereoStyleBtn.Left-gap-normalizeW, l.Stereo.Top+5, normalizeW, 22)
+	l.StereoColorBtn = makeRect(l.StereoNormalizeBtn.Left-gap-colorW, l.Stereo.Top+5, colorW, 22)
 	waveControlY := l.Wave.Top + 6
 	l.WaveZoomOutBtn = makeRect(l.Wave.Left+100, waveControlY, 22, 18)
 	l.WaveFitBtn = makeRect(l.WaveZoomOutBtn.Right+4, waveControlY, 42, 18)
@@ -2311,12 +2322,19 @@ func (a *App) drawMeterPanel(dc uintptr) {
 func (a *App) drawStereoPanel(dc uintptr) {
 	r := a.layout.Stereo
 	fill(dc, r, cPanel)
-	titleRight := a.layout.StereoNormalizeBtn.Left - 6
+	titleRight := a.layout.StereoColorBtn.Left - 6
 	titleLabel := "STEREO FIELD"
 	if titleRight-(r.Left+14) < 70 {
 		titleLabel = "FIELD"
 	}
-	text(dc, titleLabel, RECT{r.Left + 14, r.Top + 6, titleRight, r.Top + 30}, a.fontSmall, cAccent2, DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS)
+	if titleRight-r.Left-14 >= 32 {
+		text(dc, titleLabel, RECT{r.Left + 14, r.Top + 6, titleRight, r.Top + 30}, a.fontSmall, cAccent2, DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS)
+	}
+	colorLabel := "GOLD"
+	if a.stereoPhosphor.blue {
+		colorLabel = "BLUE"
+	}
+	drawAnalyzerControl(dc, a.layout.StereoColorBtn, colorLabel, a.fontTiny)
 	normalizeLabel := "NORMALIZE"
 	if rectW(a.layout.StereoNormalizeBtn) < 60 {
 		normalizeLabel = "NORM"
@@ -2363,7 +2381,7 @@ func (a *App) drawStereoPanel(dc uintptr) {
 	// panel widths. Keep the phase assessment visible in the gap below the bar.
 	text(dc, statusText, RECT{corrBar.Left, corrBar.Bottom + 1, corrBar.Right, corrBar.Bottom + 15}, a.fontTiny, statusCol, DT_RIGHT|DT_VCENTER|DT_SINGLELINE)
 
-	plot := RECT{r.Left + 18, corrBar.Bottom + 16, r.Right - 18, r.Bottom - 12}
+	plot := stereoScopeRect(r)
 	fillRound(dc, plot, 6, cSurfaceDeep)
 	strokeRound(dc, plot, 6, cBorder, 1)
 	plot = inflateRect(plot, -5, -5)
@@ -2379,14 +2397,7 @@ func (a *App) drawStereoPanel(dc uintptr) {
 	default:
 		drawGonioGrid(dc, cx, cy, rad)
 	}
-	pts := a.stereoPoints[:a.stereoPointCount]
-	if a.stereoMode == 2 && a.stereoStyle == 0 {
-		if len(pts) > 0 || stereoLineFadeRunning(a.renderTickSerial.Load(), a.stereoLineFadeUntil) {
-			a.drawPolarStereoVisualization(dc, pts, cx, cy, rad)
-		}
-	} else {
-		a.drawStereoVisualization(dc, pts, a.stereoMode, a.stereoStyle, cx, cy, rad)
-	}
+	a.drawStereoVisualization(dc, cx, cy, rad)
 	fillRound(dc, makeRect(cx-2, cy-2, 4, 4), 2, cAccent2)
 	switch a.stereoMode {
 	case 1:
@@ -2398,23 +2409,32 @@ func (a *App) drawStereoPanel(dc uintptr) {
 		text(dc, "L", makeRect(cx-rad-12, cy-8, 16, 14), a.fontTiny, cMuted, DT_CENTER|DT_VCENTER|DT_SINGLELINE)
 		text(dc, "R", makeRect(cx+rad-4, cy-8, 16, 14), a.fontTiny, cMuted, DT_CENTER|DT_VCENTER|DT_SINGLELINE)
 	default:
+		// Positive mid is up, positive side is left. Single-channel signals
+		// follow the two diagonals rather than the horizontal side axis.
+		d := int32(float64(rad) * 0.70710678)
 		text(dc, "M", makeRect(cx-10, cy-rad-16, 20, 14), a.fontTiny, cMuted, DT_CENTER|DT_VCENTER|DT_SINGLELINE)
-		text(dc, "S", makeRect(cx-10, cy+rad+2, 20, 14), a.fontTiny, cMuted, DT_CENTER|DT_VCENTER|DT_SINGLELINE)
-		text(dc, "L", makeRect(cx-rad-16, cy-7, 16, 14), a.fontTiny, cMuted, DT_CENTER|DT_VCENTER|DT_SINGLELINE)
-		text(dc, "R", makeRect(cx+rad, cy-7, 16, 14), a.fontTiny, cMuted, DT_CENTER|DT_VCENTER|DT_SINGLELINE)
+		text(dc, "S", makeRect(cx-rad-16, cy-7, 16, 14), a.fontTiny, cMuted, DT_CENTER|DT_VCENTER|DT_SINGLELINE)
+		text(dc, "L", makeRect(cx-d-16, cy-d-13, 16, 14), a.fontTiny, cMuted, DT_CENTER|DT_VCENTER|DT_SINGLELINE)
+		text(dc, "R", makeRect(cx+d, cy-d-13, 16, 14), a.fontTiny, cMuted, DT_CENTER|DT_VCENTER|DT_SINGLELINE)
 	}
+}
+
+// Fit a square just below the correlation readout even in a tall dock.
+func stereoScopeRect(panel RECT) RECT {
+	top := panel.Top + 78
+	side := max(int32(0), min(rectW(panel)-36, panel.Bottom-12-top))
+	return makeRect(panel.Left+(rectW(panel)-side)/2, top, side, side)
 }
 
 func stereoPlotGeometry(plot RECT) (cx, cy, rad int32, valid bool) {
 	cx = (plot.Left + plot.Right) / 2
 	cy = (plot.Top + plot.Bottom) / 2
-	rad = int32(math.Min(float64(rectW(plot)), float64(rectH(plot)))/2) - 10
+	rad = int32(math.Min(float64(rectW(plot)), float64(rectH(plot)))/2) - 16
 	return cx, cy, rad, rad >= 10
 }
 
 func stereoLineGeometry(panel RECT, dpi uint32) (destination RECT, width, height int, valid bool) {
-	corrBar := makeRect(panel.Left+18, panel.Top+52, rectW(panel)-36, 10)
-	plot := RECT{panel.Left + 18, corrBar.Bottom + 16, panel.Right - 18, panel.Bottom - 12}
+	plot := stereoScopeRect(panel)
 	plot = inflateRect(plot, -5, -5)
 	cx, cy, rad, valid := stereoPlotGeometry(plot)
 	if !valid {
@@ -2470,108 +2490,13 @@ func drawPolarGrid(dc uintptr, cx, cy, rad int32) {
 	}
 }
 
-func (a *App) drawStereoVisualization(dc uintptr, pts []StereoPoint, mode, style int, cx, cy, rad int32) {
+func (a *App) drawStereoVisualization(dc uintptr, cx, cy, rad int32) {
 	dpi := a.currentDPI()
 	destination := RECT{Left: cx - rad, Top: cy - rad, Right: cx + rad + 1, Bottom: cy + rad + 1}
 	width := int(scaleDPI(rectW(destination), dpi))
 	height := int(scaleDPI(rectH(destination), dpi))
 	if a.stereoPhosphor.surfaceMatches(width, height) {
 		a.stereoPhosphor.draw(dc, destination)
-	}
-}
-
-func (a *App) drawPolarStereoVisualization(dc uintptr, pts []StereoPoint, cx, cy, rad int32) {
-	a.drawPolarStereoTrace(dc, pts, cx, cy, rad)
-}
-
-func (a *App) drawPolarStereoTrace(dc uintptr, pts []StereoPoint, cx, cy, rad int32) {
-	const bins = 128
-	var env [bins]float32
-	for i := range env {
-		env[i] = 0
-	}
-	start := len(pts) - 900
-	if start < 0 {
-		start = 0
-	}
-	for i := start; i < len(pts); i++ {
-		x, y := stereoPointForMode(pts[i], 2, cx, cy, rad)
-		dx := float64(x - cx)
-		dy := float64(y - cy)
-		angle := math.Atan2(dy, dx)
-		if angle < 0 {
-			angle += 2 * math.Pi
-		}
-		if angle < math.Pi || angle > 2*math.Pi {
-			continue
-		}
-		t := (angle - math.Pi) / math.Pi
-		idx := int(t * bins)
-		if idx < 0 {
-			idx = 0
-		}
-		if idx >= bins {
-			idx = bins - 1
-		}
-		rn := float32(math.Sqrt(dx*dx+dy*dy) / float64(rad))
-		if rn > 1 {
-			rn = 1
-		}
-		// Recent samples get slightly more weight to keep the display lively.
-		age := float32(i-start) / float32(maxi(len(pts)-start, 1))
-		rn *= 0.82 + 0.18*age
-		if rn > env[idx] {
-			env[idx] = rn
-		}
-	}
-	// Smooth the envelope so the lobe looks fluid instead of spiky.
-	for pass := 0; pass < 2; pass++ {
-		var smooth [bins]float32
-		for i := 0; i < bins; i++ {
-			prev := env[maxi(i-1, 0)]
-			next := env[mini(i+1, bins-1)]
-			smooth[i] = prev*0.25 + env[i]*0.5 + next*0.25
-		}
-		env = smooth
-	}
-	for i := 0; i < bins; i++ {
-		target := env[i]
-		if target > a.polarEnvelope[i] {
-			a.polarEnvelope[i] = a.polarEnvelope[i]*0.58 + target*0.42
-		} else {
-			a.polarEnvelope[i] = a.polarEnvelope[i]*0.86 + target*0.14
-		}
-		env[i] = a.polarEnvelope[i]
-	}
-	var polyPts [bins + 2]POINT
-	polyPts[0] = POINT{X: cx, Y: cy}
-	for i := 0; i < bins; i++ {
-		ang := math.Pi + (float64(i)/float64(bins-1))*math.Pi
-		rr := float64(rad) * 0.92 * float64(env[i])
-		polyPts[i+1] = POINT{
-			X: cx + int32(math.Cos(ang)*rr),
-			Y: cy + int32(math.Sin(ang)*rr),
-		}
-	}
-	polyPts[bins+1] = POINT{X: cx, Y: cy}
-	poly(dc, polyPts[:], cStereoFill)
-	polylineRound(dc, polyPts[1:bins+1], cStereoLine, 2)
-	polyline(dc, polyPts[1:bins+1], cStereoCore, 1)
-
-	// Overlay a recent raw trace to match a mastering-style polar scope.
-	recentStart := len(pts) - 240
-	if recentStart < 0 {
-		recentStart = 0
-	}
-	var raw [240]POINT
-	rawN := 0
-	for i := recentStart; i < len(pts) && rawN < len(raw); i++ {
-		x, y := stereoPointForMode(pts[i], 2, cx, cy, rad)
-		raw[rawN] = POINT{X: x, Y: y}
-		rawN++
-	}
-	if rawN >= 2 {
-		polyline(dc, raw[:rawN], cStereoTrail, 1)
 	}
 }
 

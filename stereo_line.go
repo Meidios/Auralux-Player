@@ -11,19 +11,12 @@ const (
 	stereoPhosphorLimit                = float32(1.50)
 	stereoPhosphorInitialMax           = 256
 	stereoPhosphorDotInitialMax        = 900
-	stereoPhosphorDotMinCellSize       = 6
-	stereoPhosphorDotMaxCellSize       = 10
-	stereoPhosphorDotMinParticles      = 80
-	stereoPhosphorDotMaxParticles      = 180
-	stereoPhosphorDotDenseHits         = uint32(6)
-	stereoPhosphorDotMinRadius         = float32(1.55)
-	stereoPhosphorDotMaxRadius         = float32(2.20)
 	stereoPhosphorDotFadeTicks         = uint64(60) // 500 ms at the 120 Hz analysis cadence
-	stereoPhosphorDotHistoryDecay      = float32(0.86)
+	stereoPhosphorDotHistoryDecay      = float32(0.80)
 	stereoPhosphorDotHistoryInjection  = float32(0.34)
-	stereoPhosphorDotCoverageDecay     = float32(0.84)
+	stereoPhosphorDotCoverageDecay     = float32(0.80)
 	stereoPhosphorDotCoverageInjection = float32(0.42)
-	stereoPhosphorDotHighlightDecay    = float32(0.88)
+	stereoPhosphorDotHighlightDecay    = float32(0.80)
 	stereoPhosphorRayInitialMax        = 480
 	stereoPhosphorRayBins              = 128
 	stereoPhosphorRayHitScale          = float32(8.0)
@@ -69,29 +62,12 @@ var stereoPhosphorCurveMinSpacing = float32(1.25)
 // magnification without editing constants.
 var stereoLineDisplayGain = float32(1.35)
 
-// stereoLineLowpassHz is the -3 dB point of the two-stage position low-pass
-// applied to LINE-mode coordinates. Collected points arrive at half the audio
-// sample rate (~22 kHz), so the raw path carries audio-frequency jitter that
-// reads as a tangled ball of yarn once several hundred milliseconds of trail
-// overlap. Cutting everything above the gesture band turns the trace into a
-// smooth ribbon while beat-rate pans and width jumps still track. 30 Hz was
-// picked from the off/8/16/30 Hz render A/B: it untangles the yarn while
-// keeping a hint of oscilloscope texture. Only the position is filtered;
-// energy and freshness stay snappy. 0 disables the filter. Variable so the
-// render harness can A/B the cutoff.
-var stereoLineLowpassHz = float32(30)
+// Optional gesture filter for render comparisons. The live scope must not
+// average signed audio coordinates down to near zero at ordinary frequencies.
+var stereoLineLowpassHz float32
 
-// stereoLineFreshWindowSec is the age window over which LINE freshness ramps
-// from 1.0 down to the 0.12 floor, measured in seconds of stream time rather
-// than batch position. The old per-batch ramp (0.12 -> 1.0 across each 120 Hz
-// snapshot) was invisible while every tick traced a long zigzag; with the
-// gesture low-pass each tick covers only a few pixels, so the ramp compressed
-// into a sawtooth that read as a string of beads. Time-based aging keeps the
-// seam between consecutive ticks continuous at any path speed. 80 ms keeps
-// the per-tick seam step under 0.2 while still giving the head a mild recency
-// emphasis; layer decay then handles the longer trail fade. 0 restores the
-// legacy per-batch ramp (also the fallback when the point rate is unknown).
-var stereoLineFreshWindowSec = float32(0.08)
+// Age the head of the trace in stream time, independently of UI batch size.
+var stereoLineFreshWindowSec = float32(0.0035)
 
 func stereoLineFadeUntil(startTick uint64) uint64 {
 	return startTick + stereoLineFadeTicks
@@ -159,19 +135,8 @@ type stereoPhosphorRayBin struct {
 	Hits      uint16
 }
 
-type stereoPhosphorDotBin struct {
-	SumX, SumY float32
-	Freshness  float32
-	Hits       uint32
-	Seed       uint64
-}
-
-type stereoPhosphorDotCandidate struct {
-	Index int
-	Rank  uint64
-}
-
 type stereoPhosphorState struct {
+	blue              bool
 	diffuseDots       bool
 	width, height     int
 	energyLayers      [2][]float32
@@ -227,18 +192,11 @@ type stereoPhosphorState struct {
 	curveValid       bool
 	tailFlushed      bool
 	renderStyle      int
+	lineSamples      [512]StereoPoint
+	lineCount        int
+	lineDirty        bool
 
-	dotCellSize     int
-	dotColumns      int
-	dotBins         []stereoPhosphorDotBin
-	dotActive       []int
-	dotCandidates   []stereoPhosphorDotCandidate
-	dotDisplayFrame uint64
-	dotFrameValid   bool
-
-	// linePointRate is the collected LINE point rate in points per second
-	// (half the audio sample rate). 0 disables the gesture low-pass, which
-	// keeps sparse synthetic control streams in unit tests unfiltered.
+	// LINE uses the collected sample rate to normalize exposure and sample age.
 	linePointRate float32
 	lowpassValid  bool
 	lowpassAX     float32
@@ -339,60 +297,8 @@ func (s *stereoPhosphorState) runRenderPhase(phase stereoPhosphorRenderPhase, to
 	}
 }
 
-func stereoPhosphorDotCellSize(width, height int) int {
-	size := int(math.Round(float64(mini(width, height)) * 0.018))
-	if size < stereoPhosphorDotMinCellSize {
-		return stereoPhosphorDotMinCellSize
-	}
-	if size > stereoPhosphorDotMaxCellSize {
-		return stereoPhosphorDotMaxCellSize
-	}
-	return size
-}
-
-func stereoPhosphorDotParticleLimit(width, height int) int {
-	limit := int(math.Round(float64(width*height) / 1400.0))
-	if limit < stereoPhosphorDotMinParticles {
-		return stereoPhosphorDotMinParticles
-	}
-	if limit > stereoPhosphorDotMaxParticles {
-		return stereoPhosphorDotMaxParticles
-	}
-	return limit
-}
-
-func (s *stereoPhosphorState) configureDotGrid() {
-	cellSize := stereoPhosphorDotCellSize(s.width, s.height)
-	columns := (s.width + cellSize - 1) / cellSize
-	rows := (s.height + cellSize - 1) / cellSize
-	binCount := columns * rows
-	particleLimit := stereoPhosphorDotParticleLimit(s.width, s.height)
-	if s.dotCellSize == cellSize && s.dotColumns == columns && len(s.dotBins) == binCount && cap(s.dotActive) >= binCount && cap(s.dotCandidates) >= particleLimit {
-		s.resetDots()
-		return
-	}
-	s.dotCellSize = cellSize
-	s.dotColumns = columns
-	s.dotBins = make([]stereoPhosphorDotBin, binCount)
-	s.dotActive = make([]int, 0, binCount)
-	s.dotCandidates = make([]stereoPhosphorDotCandidate, 0, particleLimit)
-	s.dotDisplayFrame = 0
-	s.dotFrameValid = false
-}
-
-func (s *stereoPhosphorState) resetDots() {
-	for _, index := range s.dotActive {
-		if index >= 0 && index < len(s.dotBins) {
-			s.dotBins[index] = stereoPhosphorDotBin{}
-		}
-	}
-	s.dotActive = s.dotActive[:0]
-	s.dotCandidates = s.dotCandidates[:0]
-	s.dotDisplayFrame = 0
-	s.dotFrameValid = false
-}
-
 func (s *stereoPhosphorState) resetCurve() {
+	s.lineCount, s.lineDirty = 0, false
 	s.rawCount = 0
 	s.filteredCount = 0
 	s.resampleValid = false
@@ -437,7 +343,6 @@ func (s *stereoPhosphorState) reset() {
 	s.surfaceActive = false
 	s.composedBlank = false
 	s.resetCurve()
-	s.resetDots()
 	s.resetRays()
 }
 
@@ -459,9 +364,6 @@ func (s *stereoPhosphorState) destroy() {
 		s.coverageLayers[i] = nil
 	}
 	s.highlightEnergy, s.compositeEnergy, s.compositeCoverage, s.blurScratch, s.glowEnergy, s.pixels = nil, nil, nil, nil, nil, nil
-	s.resetDots()
-	s.dotCellSize, s.dotColumns = 0, 0
-	s.dotBins, s.dotActive, s.dotCandidates = nil, nil, nil
 	s.sequenceValid = false
 	s.tickValid = false
 	s.displayFrameValid = false
@@ -517,7 +419,6 @@ func (s *stereoPhosphorState) ensureSurface(width, height int) bool {
 	s.blurScratch = make([]float32, width*height)
 	s.glowEnergy = make([]float32, width*height)
 	s.pixels = unsafe.Slice((*byte)(unsafe.Pointer(bits)), width*height*4)
-	s.configureDotGrid()
 	return true
 }
 
@@ -633,7 +534,26 @@ func (s *stereoPhosphorState) moveToDisplayFrame(displayFrame uint64) (rewound b
 	}
 	if displayFrame > s.lastDisplayFrame {
 		s.surfaceActive = false
-		s.ageHistory(displayFrame - s.lastDisplayFrame)
+		if s.renderStyle == 0 {
+			// LINE only needs temporal afterglow. Do not feed it into the DOT/RAY
+			// density, bloom or highlight accumulators.
+			elapsed := displayFrame - s.lastDisplayFrame
+			decay := float32(math.Pow(.36, float64(elapsed)))
+			injection := float32(.23 * math.Pow(.36, float64(elapsed-1)))
+			for i, v := range s.coverageLayers[0] {
+				h := max(s.highlightEnergy[i]*decay, v*injection)
+				if h < .005 {
+					h = 0
+				} else {
+					s.surfaceActive = true
+				}
+				s.highlightEnergy[i] = h
+			}
+			clear(s.coverageLayers[0])
+			clear(s.energyLayers[0])
+		} else {
+			s.ageHistory(displayFrame - s.lastDisplayFrame)
+		}
 		s.lastDisplayFrame = displayFrame
 		return false
 	}
@@ -641,6 +561,9 @@ func (s *stereoPhosphorState) moveToDisplayFrame(displayFrame uint64) (rewound b
 		for i := range s.energyLayers {
 			clear(s.energyLayers[i])
 			clear(s.coverageLayers[i])
+		}
+		if s.renderStyle == 0 {
+			clear(s.highlightEnergy)
 		}
 		s.lastDisplayFrame = displayFrame
 		s.composedFrameValid = false
@@ -843,29 +766,71 @@ func (s *stereoPhosphorState) depositCoverage(x, y, amount float32) {
 	}
 }
 
-func (s *stereoPhosphorState) rasterPointCoverage(point stereoPhosphorPoint, radius, freshness float32) {
-	freshness = stereoPhosphorClamp(freshness, 0, 1)
-	if freshness > 0 {
-		s.surfaceActive = true
+// Keep a contiguous suffix across analysis callbacks. The time window stays
+// the same at different device rates; the fixed buffer bounds memory.
+func (s *stereoPhosphorState) collectLine(points []StereoPoint) {
+	rate := s.linePointRate
+	if rate <= 0 {
+		rate = 24000
 	}
-	extent := radius + 0.5
-	minX := max(0, int(math.Floor(float64(point.X-extent))))
-	maxX := min(s.width-1, int(math.Ceil(float64(point.X+extent))))
-	minY := max(0, int(math.Floor(float64(point.Y-extent))))
-	maxY := min(s.height-1, int(math.Ceil(float64(point.Y+extent))))
-	for y := minY; y <= maxY; y++ {
-		dy := float32(y) - point.Y
-		for x := minX; x <= maxX; x++ {
-			dx := float32(x) - point.X
-			distance := float32(math.Sqrt(float64(dx*dx + dy*dy)))
-			coverage := stereoPhosphorClamp(radius+0.5-distance, 0, 1) * freshness
-			if coverage <= 0 {
-				continue
+	limit := max(2, min(len(s.lineSamples), int(math.Ceil(float64(rate*stereoLineFreshWindowSec)))))
+	if len(points) == 0 {
+		return
+	}
+	if len(points) > limit {
+		points = points[len(points)-limit:]
+	}
+	keep := min(s.lineCount, limit-len(points))
+	copy(s.lineSamples[:keep], s.lineSamples[s.lineCount-keep:s.lineCount])
+	s.lineCount = keep + copy(s.lineSamples[keep:], points)
+	s.lineDirty = true
+}
+
+// Draw from the head backwards so an unusually busy signal cannot fill the
+// scope with loops even inside the short time window. A crossing never adds
+// brightness to a pixel that's already part of the same stroke.
+func (s *stereoPhosphorState) drawRecentLine(mode int) {
+	if !s.lineDirty || s.lineCount == 0 {
+		return
+	}
+	s.lineDirty = false
+	n := s.lineCount
+	budget := float32(min(s.width, s.height)) * 2.15
+	beam := stereoPhosphorClamp(float32(min(s.width, s.height))/300, .85, 1.5)
+	traveled := float32(0)
+	var newer stereoPhosphorPoint
+	head := true
+	for i := n - 1; i >= 0; i-- {
+		sample := s.lineSamples[i]
+		if sample == (StereoPoint{}) {
+			// A lone zero within a waveform is a valid crossing. A run of digital
+			// silence breaks the stroke; never bridge the gap to an older event.
+			if i == 0 || s.lineSamples[i-1] == (StereoPoint{}) {
+				break
 			}
-			index := y*s.width + x
-			if coverage > s.coverageLayers[stereoPhosphorCurrentLayer][index] {
-				s.coverageLayers[stereoPhosphorCurrentLayer][index] = coverage
-			}
+		}
+		p := stereoPhosphorMapPoint(sample, mode, s.width, s.height)
+		if head {
+			newer = p
+			head = false
+			s.rasterStroke(newer, newer, 1, 1, beam, true)
+			continue
+		}
+		dx, dy := p.X-newer.X, p.Y-newer.Y
+		d := float32(math.Sqrt(float64(dx*dx + dy*dy)))
+		next := min(budget, traveled+d)
+		if traveled+d > budget {
+			r := (budget - traveled) / d
+			p = stereoPhosphorPoint{newer.X + dx*r, newer.Y + dy*r}
+		}
+		age := func(idx int, length float32) float32 {
+			t := max(float32(n-1-idx)/float32(max(n-1, 1)), length/budget)
+			return 1 - .72*t
+		}
+		s.rasterStroke(newer, p, age(i+1, traveled), age(i, next), beam, true)
+		newer, traveled = p, next
+		if traveled >= budget {
+			break
 		}
 	}
 }
@@ -884,6 +849,10 @@ func stereoPhosphorClamp(value, low, high float32) float32 {
 // capsule. Coverage is continuous along the segment, so the bright core does
 // not reveal the individual curve samples as a dotted chain.
 func (s *stereoPhosphorState) rasterStrokeSegment(from, to stereoPhosphorPoint, freshnessFrom, freshnessTo float32) {
+	s.rasterStroke(from, to, freshnessFrom, freshnessTo, stereoPhosphorStrokeRadius, false)
+}
+
+func (s *stereoPhosphorState) rasterStroke(from, to stereoPhosphorPoint, freshnessFrom, freshnessTo, radius float32, beam bool) {
 	freshnessFrom = stereoPhosphorClamp(freshnessFrom, 0, 1)
 	freshnessTo = stereoPhosphorClamp(freshnessTo, 0, 1)
 	if freshnessFrom <= 0 && freshnessTo <= 0 {
@@ -892,7 +861,10 @@ func (s *stereoPhosphorState) rasterStrokeSegment(from, to stereoPhosphorPoint, 
 	s.surfaceActive = true
 	dx, dy := to.X-from.X, to.Y-from.Y
 	lengthSquared := dx*dx + dy*dy
-	extent := stereoPhosphorStrokeRadius + 0.5
+	extent := radius + 0.5
+	if beam {
+		extent = radius*4.2 + .5
+	}
 	minX := int(math.Floor(float64(min(from.X, to.X) - extent)))
 	maxX := int(math.Ceil(float64(max(from.X, to.X) + extent)))
 	minY := int(math.Floor(float64(min(from.Y, to.Y) - extent)))
@@ -922,11 +894,19 @@ func (s *stereoPhosphorState) rasterStrokeSegment(from, to stereoPhosphorPoint, 
 			cdx, cdy := px-closestX, py-closestY
 			distance := float32(math.Sqrt(float64(cdx*cdx + cdy*cdy)))
 			freshness := freshnessFrom + (freshnessTo-freshnessFrom)*t
-			coverage := stereoPhosphorClamp(stereoPhosphorStrokeRadius+0.5-distance, 0, 1) * freshness
+			index := y*s.width + x
+			width := radius
+			if beam {
+				width *= .50 + .70*freshness
+				// Compact radial falloff instead of a frame-wide blur. Max blending
+				// keeps crossings and sustained mono signals from accumulating fog.
+				u := max(float32(0), 1-distance/(width*3.5+.5))
+				s.energyLayers[0][index] = max(s.energyLayers[0][index], u*u*freshness)
+			}
+			coverage := stereoPhosphorClamp(width+0.5-distance, 0, 1) * freshness
 			if coverage <= 0 {
 				continue
 			}
-			index := y*s.width + x
 			if coverage > s.coverageLayers[stereoPhosphorCurrentLayer][index] {
 				s.coverageLayers[stereoPhosphorCurrentLayer][index] = coverage
 			}
@@ -940,235 +920,40 @@ func (s *stereoPhosphorState) splat(x, y, amount float32) {
 	s.depositEnergy(x, y, amount)
 }
 
-func (s *stereoPhosphorState) splatFresh(point stereoPhosphorPoint, energy, freshness float32) {
-	s.splatDotParticle(point, stereoPhosphorDotMinRadius, energy, freshness)
-}
-
-func (s *stereoPhosphorState) splatDotParticle(point stereoPhosphorPoint, radius, energy, freshness float32) {
-	s.rasterPointCoverage(point, radius, freshness)
-	s.depositEnergy(point.X, point.Y, energy)
-}
-
-func stereoPhosphorMixSequence(value uint64) uint64 {
-	// SplitMix64 gives stable, well-distributed particle choices without a
-	// mutable RNG. The same audio sample therefore never flickers between
-	// positions when UI messages are coalesced or repainted.
-	value += 0x9e3779b97f4a7c15
-	value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9
-	value = (value ^ (value >> 27)) * 0x94d049bb133111eb
-	return value ^ (value >> 31)
-}
-
-func stereoPhosphorPointSequence(sequence uint64, pointCount, index int) uint64 {
-	if pointCount <= 0 || index < 0 || index >= pointCount {
-		return sequence
+// Deposit each sample at its measured subpixel position. Separate the sharp
+// new grain from the wider additive exposure that survives in phosphor history.
+func (s *stereoPhosphorState) exposeDot(p stereoPhosphorPoint, freshness float32) {
+	scale := stereoPhosphorClamp(float32(min(s.width, s.height))/300, .8, 1.8)
+	radius := 2.1 * scale
+	if s.diffuseDots {
+		radius *= 1.65
 	}
-	distanceFromNewest := uint64(pointCount - 1 - index)
-	if distanceFromNewest > sequence {
-		return uint64(index + 1)
+	intensity := float32(.48)
+	if s.linePointRate > 0 {
+		intensity *= stereoPhosphorClamp(24000/s.linePointRate, .125, 4)
 	}
-	return sequence - distanceFromNewest
-}
-
-func stereoPhosphorHashUnit(hash uint64, shift uint) float32 {
-	return float32((hash>>shift)&0xffff) / 65535
-}
-
-func stereoPhosphorDotScatterScale(width, height int) float32 {
-	scale := float32(mini(width, height)) / 450
-	return stereoPhosphorClamp(scale, 0.75, 1.35)
-}
-
-func stereoPhosphorDotParticle(seed uint64, width, height int, hits uint32, halo bool) (offset stereoPhosphorPoint, radius, energy float32) {
-	hash := stereoPhosphorMixSequence(seed)
-	scale := stereoPhosphorDotScatterScale(width, height)
-	uDistance := stereoPhosphorHashUnit(hash, 16)
-	uAngle := stereoPhosphorHashUnit(hash, 32)
-	uRadius := stereoPhosphorHashUnit(hash, 48)
-	uEnergy := stereoPhosphorHashUnit(stereoPhosphorMixSequence(hash), 16)
-	minDistance, maxDistance := float32(2), float32(5)
-	if halo {
-		minDistance, maxDistance = 10, 22
-	} else {
-		tier := hash & 255
-		if tier >= 51 && tier < 204 {
-			minDistance, maxDistance = 5, 12
-		} else if tier >= 204 {
-			minDistance, maxDistance = 12, 18
-		}
+	if s.diffuseDots {
+		intensity *= .56
 	}
-	minDistance *= scale
-	maxDistance *= scale
-	distance := float32(math.Sqrt(float64(minDistance*minDistance + uDistance*(maxDistance*maxDistance-minDistance*minDistance))))
-	angle := float64(uAngle) * 2 * math.Pi
-	offset = stereoPhosphorPoint{X: float32(math.Cos(angle)) * distance, Y: float32(math.Sin(angle)) * distance}
-	densityBoost := float32(math.Log2(float64(hits)+1)) * 0.04
-	if halo {
-		radius = stereoPhosphorDotMinRadius + 0.40*uRadius
-		energy = 0.35 + 0.25*uEnergy + stereoPhosphorMin(densityBoost*0.30, 0.05)
-		return offset, radius, stereoPhosphorMin(energy, 0.65)
-	}
-	radius = stereoPhosphorDotMinRadius + (stereoPhosphorDotMaxRadius-stereoPhosphorDotMinRadius)*uRadius
-	energy = 0.90 + 0.20*uEnergy + stereoPhosphorMin(densityBoost, 0.15)
-	return offset, radius, stereoPhosphorMin(energy, 1.25)
-}
-
-func (s *stereoPhosphorState) addDotPoint(point stereoPhosphorPoint, freshness float32, sequence, displayFrame uint64) {
-	if len(s.dotBins) == 0 || s.dotColumns == 0 || s.dotCellSize == 0 {
-		s.configureDotGrid()
-	}
-	if len(s.dotBins) == 0 || point.X < 0 || point.Y < 0 || point.X >= float32(s.width) || point.Y >= float32(s.height) {
-		return
-	}
-	if !s.dotFrameValid {
-		s.dotDisplayFrame = displayFrame
-		s.dotFrameValid = true
-	}
-	column := int(point.X) / s.dotCellSize
-	row := int(point.Y) / s.dotCellSize
-	index := row*s.dotColumns + column
-	if index < 0 || index >= len(s.dotBins) {
-		return
-	}
-	bin := &s.dotBins[index]
-	if bin.Hits == 0 {
-		s.dotActive = append(s.dotActive, index)
-	}
-	if bin.Hits < ^uint32(0) {
-		bin.Hits++
-	}
-	bin.SumX += point.X
-	bin.SumY += point.Y
-	if freshness > bin.Freshness {
-		bin.Freshness = freshness
-	}
-	bin.Seed ^= stereoPhosphorMixSequence(sequence)
-}
-
-func stereoPhosphorDotCandidateWorse(a, b stereoPhosphorDotCandidate) bool {
-	if a.Rank != b.Rank {
-		return a.Rank > b.Rank
-	}
-	return a.Index > b.Index
-}
-
-func (s *stereoPhosphorState) addDotCandidate(candidate stereoPhosphorDotCandidate, limit int) {
-	if limit <= 0 {
-		return
-	}
-	if len(s.dotCandidates) < limit {
-		s.dotCandidates = append(s.dotCandidates, candidate)
-		child := len(s.dotCandidates) - 1
-		for child > 0 {
-			parent := (child - 1) / 2
-			if !stereoPhosphorDotCandidateWorse(s.dotCandidates[child], s.dotCandidates[parent]) {
-				break
+	inv := 1 / (radius * radius)
+	x0, x1 := max(0, int(math.Ceil(float64(p.X-radius)))), min(s.width-1, int(p.X+radius))
+	y0, y1 := max(0, int(math.Ceil(float64(p.Y-radius)))), min(s.height-1, int(p.Y+radius))
+	for y := y0; y <= y1; y++ {
+		dy := float32(y) - p.Y
+		for x := x0; x <= x1; x++ {
+			dx := float32(x) - p.X
+			k := 1 - (dx*dx+dy*dy)*inv
+			if k <= 0 {
+				continue
 			}
-			s.dotCandidates[child], s.dotCandidates[parent] = s.dotCandidates[parent], s.dotCandidates[child]
-			child = parent
+			i := y*s.width + x
+			weight := k * k
+			e := intensity * (.65 + .35*freshness) * weight
+			s.energyLayers[0][i] = min(stereoPhosphorLimit, s.energyLayers[0][i]+e)
+			s.coverageLayers[0][i] = max(s.coverageLayers[0][i], weight*weight*freshness*.70)
+			s.surfaceActive = true
 		}
-		return
 	}
-	if !stereoPhosphorDotCandidateWorse(s.dotCandidates[0], candidate) {
-		return
-	}
-	s.dotCandidates[0] = candidate
-	for parent := 0; ; {
-		left := parent*2 + 1
-		if left >= len(s.dotCandidates) {
-			break
-		}
-		worse := left
-		right := left + 1
-		if right < len(s.dotCandidates) && stereoPhosphorDotCandidateWorse(s.dotCandidates[right], s.dotCandidates[left]) {
-			worse = right
-		}
-		if !stereoPhosphorDotCandidateWorse(s.dotCandidates[worse], s.dotCandidates[parent]) {
-			break
-		}
-		s.dotCandidates[parent], s.dotCandidates[worse] = s.dotCandidates[worse], s.dotCandidates[parent]
-		parent = worse
-	}
-}
-
-func (s *stereoPhosphorState) flushDotBins() int {
-	if len(s.dotActive) == 0 {
-		s.dotFrameValid = false
-		return 0
-	}
-	particleLimit := stereoPhosphorDotParticleLimit(s.width, s.height)
-	primaryLimit := max(1, particleLimit*3/4)
-	s.dotCandidates = s.dotCandidates[:0]
-	for _, index := range s.dotActive {
-		bin := s.dotBins[index]
-		weight := uint64(1 + int(math.Sqrt(float64(bin.Hits)))*4)
-		seed := stereoPhosphorMixSequence(bin.Seed ^ stereoPhosphorMixSequence(s.dotDisplayFrame+uint64(index)+1))
-		s.addDotCandidate(stereoPhosphorDotCandidate{Index: index, Rank: seed / weight}, primaryLimit)
-	}
-	for i := 1; i < len(s.dotCandidates); i++ {
-		candidate := s.dotCandidates[i]
-		j := i - 1
-		for j >= 0 && stereoPhosphorDotCandidateWorse(s.dotCandidates[j], candidate) {
-			s.dotCandidates[j+1] = s.dotCandidates[j]
-			j--
-		}
-		s.dotCandidates[j+1] = candidate
-	}
-	emitted := 0
-	for _, candidate := range s.dotCandidates {
-		bin := s.dotBins[candidate.Index]
-		if bin.Hits == 0 {
-			continue
-		}
-		center := stereoPhosphorPoint{X: bin.SumX / float32(bin.Hits), Y: bin.SumY / float32(bin.Hits)}
-		seed := bin.Seed ^ stereoPhosphorMixSequence(s.dotDisplayFrame+uint64(candidate.Index)+1)
-		offset, radius, energy := stereoPhosphorDotParticle(seed, s.width, s.height, bin.Hits, false)
-		if !s.diffuseDots {
-			offset.X *= 0.32
-			offset.Y *= 0.32
-			radius *= 0.86
-		}
-		freshness := stereoPhosphorClamp(bin.Freshness, 0, 1)
-		s.splatDotParticle(
-			stereoPhosphorPoint{X: center.X + offset.X, Y: center.Y + offset.Y},
-			radius,
-			energy*freshness,
-			freshness*float32(math.Sqrt(float64(energy/1.25))),
-		)
-		emitted++
-	}
-	for _, candidate := range s.dotCandidates {
-		if emitted >= particleLimit {
-			break
-		}
-		bin := s.dotBins[candidate.Index]
-		if bin.Hits < stereoPhosphorDotDenseHits {
-			continue
-		}
-		center := stereoPhosphorPoint{X: bin.SumX / float32(bin.Hits), Y: bin.SumY / float32(bin.Hits)}
-		seed := bin.Seed ^ stereoPhosphorMixSequence(s.dotDisplayFrame+uint64(candidate.Index)+0x9e3779b9)
-		offset, radius, energy := stereoPhosphorDotParticle(seed, s.width, s.height, bin.Hits, true)
-		if !s.diffuseDots {
-			offset.X *= 0.32
-			offset.Y *= 0.32
-			radius *= 0.86
-		}
-		freshness := stereoPhosphorClamp(bin.Freshness*0.78, 0, 1)
-		s.splatDotParticle(
-			stereoPhosphorPoint{X: center.X + offset.X, Y: center.Y + offset.Y},
-			radius,
-			energy*freshness,
-			freshness*float32(math.Sqrt(float64(energy/0.65))),
-		)
-		emitted++
-	}
-	for _, index := range s.dotActive {
-		s.dotBins[index] = stereoPhosphorDotBin{}
-	}
-	s.dotActive = s.dotActive[:0]
-	s.dotCandidates = s.dotCandidates[:0]
-	s.dotFrameValid = false
-	return emitted
 }
 
 func (s *stereoPhosphorState) rasterSegment(from, to stereoPhosphorPoint, energy float32) {
@@ -1529,11 +1314,7 @@ func (s *stereoPhosphorState) emitSmooth(point stereoPhosphorVertex) {
 	s.smooth[0], s.smooth[1], s.smooth[2] = s.smooth[1], s.smooth[2], point
 }
 
-// setLinePointRate declares the collected point rate (points per second) of
-// the LINE stream. The gesture low-pass derives its per-point coefficient
-// from this rate, so it must reflect the real stream cadence; 0 disables the
-// filter. Survives curve resets because it describes the stream, not the
-// geometry chain.
+// The collected point rate is independent of the current trace and survives resets.
 func (s *stereoPhosphorState) setLinePointRate(rate float32) {
 	s.linePointRate = rate
 }
@@ -1564,14 +1345,14 @@ func (s *stereoPhosphorState) lowpassLinePoint(point stereoPhosphorPoint) stereo
 }
 
 func stereoPhosphorFilteredPoint(points [7]stereoPhosphorVertex) stereoPhosphorVertex {
-	return stereoPhosphorVertex{
-		Position: stereoPhosphorPoint{
-			X: (points[0].Position.X + 6*points[1].Position.X + 15*points[2].Position.X + 20*points[3].Position.X + 15*points[4].Position.X + 6*points[5].Position.X + points[6].Position.X) / 64,
-			Y: (points[0].Position.Y + 6*points[1].Position.Y + 15*points[2].Position.Y + 20*points[3].Position.Y + 15*points[4].Position.Y + 6*points[5].Position.Y + points[6].Position.Y) / 64,
-		},
-		Energy:    points[3].Energy,
-		Freshness: points[3].Freshness,
-	}
+	// Retain the center sample's excursion; use the symmetric average only
+	// to soften subpixel jitter. A pure average erases narrowband HF signals.
+	center := points[3]
+	avgX := (points[0].Position.X + 6*points[1].Position.X + 15*points[2].Position.X + 20*center.Position.X + 15*points[4].Position.X + 6*points[5].Position.X + points[6].Position.X) / 64
+	avgY := (points[0].Position.Y + 6*points[1].Position.Y + 15*points[2].Position.Y + 20*center.Position.Y + 15*points[4].Position.Y + 6*points[5].Position.Y + points[6].Position.Y) / 64
+	center.Position.X += 0.15 * (avgX - center.Position.X)
+	center.Position.Y += 0.15 * (avgY - center.Position.Y)
+	return center
 }
 
 func (s *stereoPhosphorState) emitResampled(position stereoPhosphorPoint, energy, distance, freshness float32) {
@@ -1906,6 +1687,9 @@ func (s *stereoPhosphorState) runRenderJob(job stereoPhosphorRenderJob) {
 				current := s.energyLayers[0][index]
 				coreAlpha := stereoPhosphorResponses.core[stereoPhosphorResponseIndex(value, stereoPhosphorLimit)]
 				coreColor := s.coreColorLUT[stereoPhosphorResponseIndex(current, stereoPhosphorLimit)]
+				if s.renderStyle == 1 {
+					coreColor = s.coreColorLUT[stereoPhosphorResponseIndex(.68*value+.32*current, stereoPhosphorLimit)]
+				}
 				currentCoverage := s.coverageLayers[0][index]
 				freshness := stereoPhosphorMax(s.highlightEnergy[index], currentCoverage)
 				freshAlpha := stereoPhosphorFreshAlpha(freshness)
@@ -1941,6 +1725,40 @@ func (s *stereoPhosphorState) runRenderJob(job stereoPhosphorRenderJob) {
 	}
 }
 
+// Compose LINE's thin core, local halo, and decaying previous stroke directly.
+// All three use the active theme; LINE has no diffuse, full-surface bloom.
+func (s *stereoPhosphorState) renderLineBeam(p [4]uint32) {
+	s.ensureColorLUT(p[0], p[1], p[2], p[3])
+	for i, core := range s.coverageLayers[0] {
+		s.compositeCoverage[i] = core
+		glow, hist := s.energyLayers[0][i], s.highlightEnergy[i]
+		off := 4 * i
+		if core == 0 && glow == 0 && hist == 0 {
+			clear(s.pixels[off : off+4])
+			continue
+		}
+		var r, g, b, a float32
+		stereoPhosphorOver(&r, &g, &b, &a, p[1], .78*hist)
+		stereoPhosphorOver(&r, &g, &b, &a, p[2], .62*glow)
+		color := s.freshColorLUT[stereoPhosphorResponseIndex(core*core, 1)]
+		stereoPhosphorOver(&r, &g, &b, &a, color, core)
+		s.pixels[off], s.pixels[off+1], s.pixels[off+2], s.pixels[off+3] = byte(b*255), byte(g*255), byte(r*255), byte(a*255)
+	}
+}
+
+// Recolor existing exposures without advancing the analysis or its fade clock.
+func (s *stereoPhosphorState) renderStereoColors() {
+	p := cStereoGoldPalette
+	if s.blue {
+		p = [4]uint32{cStereoTrail, cStereoLine, cStereoCore, cStereoPeak}
+	}
+	if s.renderStyle == 0 {
+		s.renderLineBeam(p)
+	} else {
+		s.renderPixels(p[0], p[1], p[2], p[3])
+	}
+}
+
 func (s *stereoPhosphorState) renderPixels(trail, lineColor, core, peak uint32) {
 	pixelCount := s.width * s.height
 	if len(s.pixels) != pixelCount*4 || len(s.highlightEnergy) != pixelCount || len(s.compositeEnergy) != pixelCount || len(s.compositeCoverage) != pixelCount || len(s.glowEnergy) != pixelCount {
@@ -1948,6 +1766,12 @@ func (s *stereoPhosphorState) renderPixels(trail, lineColor, core, peak uint32) 
 	}
 	s.ensureColorLUT(trail, lineColor, core, peak)
 	s.renderBlurRadius = stereoPhosphorGlowRadius(s.width, s.height)
+	if s.renderStyle == 1 {
+		s.renderBlurRadius = max(2, s.renderBlurRadius/2)
+		if s.diffuseDots {
+			s.renderBlurRadius += 2
+		}
+	}
 	s.renderDiameter = s.renderBlurRadius*2 + 1
 	if s.dc != 0 && pixelCount >= stereoPhosphorParallelPixels {
 		s.ensureRenderPool()
@@ -1971,22 +1795,10 @@ func (s *stereoPhosphorState) advanceStyle(points []StereoPoint, sequence, tick 
 	if s.tickValid && tick == s.lastTick {
 		return true, false
 	}
-	elapsed := uint64(0)
-	if s.tickValid && tick > s.lastTick {
-		elapsed = tick - s.lastTick
-	}
 	s.lastTick, s.tickValid = tick, true
-	if s.renderStyle != style && (s.renderStyle == 1 || style == 1) {
-		s.resetDots()
-	}
 	s.renderStyle = style
 	displayFrame := stereoLineDisplayFrame(tick)
 	center := stereoPhosphorCenter(width, height)
-	if style == 1 && s.dotFrameValid && displayFrame != s.dotDisplayFrame {
-		// A skipped compose must still commit the completed density exposure
-		// before its pixels move from the current layer into phosphor history.
-		s.flushDotBins()
-	}
 	if style == 2 && s.rayFrameValid && displayFrame != s.rayDisplayFrame {
 		// Preserve a half exposure when UI coalescing skips its nominal compose
 		// tick. Deposit it before the completed frame moves into history.
@@ -1996,90 +1808,50 @@ func (s *stereoPhosphorState) advanceStyle(points []StereoPoint, sequence, tick 
 	if s.moveToDisplayFrame(displayFrame) {
 		s.sequenceValid = false
 	}
-	if style == 0 && len(points) > 0 && s.tailFlushed {
-		s.resetCurve()
-	}
-	selectionElapsed := elapsed
-	if selectionElapsed == 0 {
-		selectionElapsed = 1
-	}
 	initialMax := stereoPhosphorInitialMax
 	switch style {
+	case 0:
+		initialMax = len(s.lineSamples)
 	case 1:
 		initialMax = stereoPhosphorDotInitialMax
 	case 2:
 		initialMax = stereoPhosphorRayInitialMax
 	}
 	start, discontinuity := s.newPointStartLimited(len(points), sequence, initialMax)
-	if discontinuity {
-		if style == 0 {
-			s.resetCurve()
-			// Initial snapshots and true sequence gaps have no valid predecessor.
-			// Limit only those catch-up paths; trimming a normal incremental batch
-			// would manufacture a visible break in an otherwise continuous curve.
-			if arcStart, trimmed := stereoPhosphorArcStart(points, start, mode, width, height); trimmed {
-				start = arcStart
-			}
-		} else {
-			switch style {
-			case 1:
-				s.resetDots()
-			case 2:
-				s.resetRays()
-			}
+	if style == 0 {
+		if discontinuity || len(points) == 0 {
+			s.lineCount, s.lineDirty = 0, false
 		}
+		s.collectLine(points[start:])
+		start = len(points)
+	}
+	if discontinuity && style == 2 {
+		s.resetRays()
 	}
 	count := len(points) - start
-	spacing := stereoPhosphorControlSpacing(width, height)
 	if style == 2 && count > 0 && !s.rayFrameValid {
 		s.rayDisplayFrame = displayFrame
 		s.rayFrameValid = true
 	}
-	timeFreshness := style == 0 && s.linePointRate > 0 && stereoLineFreshWindowSec > 0
 	for i := start; i < len(points); i++ {
 		freshness := stereoPhosphorAgeEnergy(i-start, count)
-		if timeFreshness {
-			// Age in stream time keeps the freshness seam between consecutive
-			// 120 Hz batches invisible: the oldest point of this batch is only
-			// one tick older than the newest point of the previous one.
-			pointSequence := stereoPhosphorPointSequence(sequence, len(points), i)
-			var agePoints uint64
-			if sequence > pointSequence {
-				agePoints = sequence - pointSequence
-			}
-			age := float32(agePoints) / (s.linePointRate * stereoLineFreshWindowSec)
-			if age > 1 {
-				age = 1
-			}
-			freshness = 0.12 + 0.88*(1-age)*(1-age)
-		}
 		if style == 1 {
-			pointSequence := stereoPhosphorPointSequence(sequence, len(points), i)
+			if points[i] == (StereoPoint{}) {
+				continue
+			}
 			mapped := stereoPhosphorMapPoint(points[i], mode, width, height)
-			s.addDotPoint(mapped, freshness, pointSequence, displayFrame)
+			s.exposeDot(mapped, freshness)
 			continue
 		}
 		mapped := stereoPhosphorMapPoint(points[i], mode, width, height)
-		switch style {
-		case 2:
-			s.addRayPoint(mapped, center, freshness)
-		default:
-			s.addRawPoint(stereoPhosphorVertex{
-				Position:  s.lowpassLinePoint(mapped),
-				Energy:    freshness * stereoLineTickEnergy,
-				Freshness: freshness,
-			}, spacing)
-		}
-	}
-	if style == 0 && len(points) == 0 {
-		s.flushCurveTail(spacing)
+		s.addRayPoint(mapped, center, freshness)
 	}
 	// If UI message coalescing skips the nominal even tick, compose the newest
 	// available frame once; never replay obsolete pixel passes to catch up.
 	compose := stereoLineShouldComposeFrame(tick, s.lastComposedTick, s.composedFrameValid)
 	if compose && (!s.composedFrameValid || displayFrame > s.lastComposedFrame) {
-		if style == 1 && s.dotFrameValid {
-			s.flushDotBins()
+		if style == 0 {
+			s.drawRecentLine(mode)
 		}
 		if style == 2 && s.rayFrameValid {
 			s.flushRayBins(center)
@@ -2087,7 +1859,7 @@ func (s *stereoPhosphorState) advanceStyle(points []StereoPoint, sequence, tick 
 		}
 		switch {
 		case s.surfaceActive:
-			s.renderPixels(cStereoTrail, cStereoLine, cStereoCore, cStereoPeak)
+			s.renderStereoColors()
 			s.composedBlank = false
 			composed = true
 		case !s.composedBlank:
