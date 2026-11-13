@@ -102,6 +102,7 @@ const (
 )
 
 type App struct {
+	help        helpController
 	hwnd        uintptr
 	engine      *AudioEngine
 	engineReady atomic.Bool
@@ -143,7 +144,7 @@ type App struct {
 	loudnessLoopMarkers                            []float64
 	loudnessElapsed                                float64
 	loudnessRenderElapsed                          float64
-	loudnessLastPos                                float64
+	historyClock                                   historyClock
 	loudnessSegment                                uint32
 	loudnessWindow                                 int
 	loudnessHZoom                                  float64
@@ -203,6 +204,7 @@ type App struct {
 	manualStop                                     bool
 	lastNonZeroVolume                              float32
 	volumeDragStart                                float32
+	volumeSaveAt                                   time.Time
 	volumePopupUntil                               time.Time
 
 	dragMode                 int
@@ -252,8 +254,8 @@ type App struct {
 }
 
 func NewApp() *App {
-	a := &App{engine: newAudioEngine(), playlists: []Playlist{newDefaultPlaylist()}, activePlaylistID: defaultPlaylistID, playbackPlaylistID: defaultPlaylistID, current: -1, continuousPlay: true, dpi: 96, status: "正在准备音频引擎…", lufsM: -120, lufsS: -120, lufsI: -120, lra: 0, truePeak: -120, hover: hoverOutsidePoint(), paintedHover: hoverOutsidePoint(),
-		playlistWidth: 260, rightWidth: 410, fileInfoHeight: 220, loudnessHeight: 260, meterHeight: 318, stereoHeight: 238, loudnessWindow: 3, loudnessHZoom: 1, loudnessYMin: -60, loudnessYMax: 0, loudnessLastPos: -1, loudnessCustomTarget: -18, spectrumFFT: 1, spectrumSmoothing: 1, spectrumTilt: 2, spectrogramTimeWindow: 1, spectrogramRange: 90, waveZoom: 1, deviceName: "Output Device", inputDeviceName: "NONE", lastNonZeroVolume: 0.8}
+	a := &App{engine: newAudioEngine(), playlists: []Playlist{newDefaultPlaylist()}, activePlaylistID: defaultPlaylistID, playbackPlaylistID: defaultPlaylistID, current: -1, continuousPlay: true, dpi: 96, status: "Preparing audio engine…", lufsM: -120, lufsS: -120, lufsI: -120, lra: 0, truePeak: -120, hover: hoverOutsidePoint(), paintedHover: hoverOutsidePoint(),
+		playlistWidth: 260, rightWidth: 410, fileInfoHeight: 220, loudnessHeight: 260, meterHeight: 318, stereoHeight: 238, loudnessWindow: 3, loudnessHZoom: 1, loudnessYMin: -60, loudnessYMax: 0, loudnessCustomTarget: -18, spectrumFFT: 1, spectrumSmoothing: 1, spectrumTilt: 2, spectrogramTimeWindow: 1, spectrogramRange: 90, waveZoom: 1, deviceName: "Output Device", inputDeviceName: "NONE", lastNonZeroVolume: defaultPlaybackVolume}
 	a.stereoNormalizeGain = 1
 	a.fontTitle = createFont(22, FW_BOLD)
 	a.fontSection = createFont(15, FW_SEMIBOLD)
@@ -265,7 +267,7 @@ func NewApp() *App {
 	if err == nil {
 		a.uiImages = assets
 	} else {
-		a.status = "界面资源加载失败：" + err.Error()
+		a.status = "Could not load interface assets: " + err.Error()
 		a.statusError = true
 	}
 	a.loadLayoutConfig()
@@ -452,17 +454,17 @@ func nextPlaylistName(playlists []Playlist) string {
 func (a *App) validatePlaylistName(name, exceptID string) (string, string) {
 	name = strings.TrimSpace(name)
 	if name == "" {
-		return "", "请输入 Playlist 名称"
+		return "", tr("请输入 Playlist 名称")
 	}
 	if utf8.RuneCountInString(name) > 64 {
-		return "", "名称不能超过 64 个字符"
+		return "", tr("名称不能超过 64 个字符")
 	}
 	if exceptID != defaultPlaylistID && strings.EqualFold(name, "PLAYLIST") {
-		return "", "PLAYLIST 是默认列表的保留名称"
+		return "", tr("PLAYLIST 是默认列表的保留名称")
 	}
 	for i := range a.playlists {
 		if a.playlists[i].ID != exceptID && strings.EqualFold(a.playlists[i].Name, name) {
-			return "", "已存在同名 Playlist"
+			return "", tr("已存在同名 Playlist")
 		}
 	}
 	return name, ""
@@ -615,6 +617,8 @@ func (a *App) playlistStateSnapshot() playlistState {
 }
 
 type layoutConfig struct {
+	Volume                float32 `json:"volume"`
+	UnmutedVolume         float32 `json:"unmuted_volume"`
 	LayoutVersion         int     `json:"layout_version"`
 	PlaylistWidth         int32   `json:"playlist_width"`
 	RightWidth            int32   `json:"right_width"`
@@ -641,6 +645,7 @@ type layoutConfig struct {
 	SpectrogramFreqMin    float64 `json:"spectrogram_freq_min,omitempty"`
 	SpectrogramFreqMax    float64 `json:"spectrogram_freq_max,omitempty"`
 	StereoMode            int     `json:"stereo_mode"`
+	DiffuseDots           bool    `json:"diffuse_dots,omitempty"`
 	StereoStyle           int     `json:"stereo_style,omitempty"`
 	StereoNormalize       bool    `json:"stereo_normalize,omitempty"`
 	ContinuousPlay        bool    `json:"continuous_play"`
@@ -663,9 +668,18 @@ func (a *App) loadLayoutConfig() {
 	if err != nil {
 		return
 	}
-	var cfg layoutConfig
+	// Missing fields in older layouts mean first launch; an explicit zero means mute.
+	cfg := layoutConfig{Volume: defaultPlaybackVolume, UnmutedVolume: defaultPlaybackVolume}
 	if json.Unmarshal(data, &cfg) != nil {
 		return
+	}
+	if cfg.Volume >= 0 && cfg.Volume <= maxPlaybackVolume {
+		a.engine.SetVolume(cfg.Volume)
+	}
+	if v := a.engine.Volume(); v > 0.001 {
+		a.lastNonZeroVolume = v
+	} else if cfg.UnmutedVolume > 0.001 && cfg.UnmutedVolume <= maxPlaybackVolume {
+		a.lastNonZeroVolume = cfg.UnmutedVolume
 	}
 	if cfg.PlaylistWidth >= 210 && cfg.PlaylistWidth <= 520 {
 		a.playlistWidth = cfg.PlaylistWidth
@@ -761,6 +775,7 @@ func (a *App) loadLayoutConfig() {
 	if cfg.StereoMode >= 0 && cfg.StereoMode <= 2 {
 		a.stereoMode = cfg.StereoMode
 	}
+	a.stereoPhosphor.diffuseDots = cfg.DiffuseDots
 	if cfg.StereoStyle >= 0 && cfg.StereoStyle <= 2 {
 		a.stereoStyle = cfg.StereoStyle
 	}
@@ -794,6 +809,7 @@ func (a *App) saveLayoutConfig() {
 		view = a.analyzerViewBeforeInput
 	}
 	cfg := layoutConfig{
+		Volume: a.engine.Volume(), UnmutedVolume: a.lastNonZeroVolume,
 		LayoutVersion: 14, PlaylistWidth: a.playlistWidth, RightWidth: a.rightWidth, FileInfoHeight: a.fileInfoHeight,
 		LoudnessHeight: a.loudnessHeight, MeterHeight: a.meterHeight, StereoHeight: a.stereoHeight, ThemeMode: a.themeMode,
 		LoudnessWindow: a.loudnessWindow, LoudnessHZoom: a.loudnessHZoom, LoudnessYMin: a.loudnessYMin, LoudnessYMax: a.loudnessYMax,
@@ -801,7 +817,7 @@ func (a *App) saveLayoutConfig() {
 		SpectrumFFT: a.spectrumFFT, SpectrumSmoothing: a.spectrumSmoothing, SpectrumTilt: a.spectrumTilt, SpectrumBandMode: a.spectrumBandMode,
 		AnalyzerView: int(view), SpectrogramTimeWindow: a.spectrogramTimeWindow, SpectrogramRange: a.spectrogramRange,
 		SpectrogramScale: int(a.spectrogramScale), SpectrogramFreqMin: a.spectrogramFreqMin, SpectrogramFreqMax: a.spectrogramFreqMax,
-		StereoMode: a.stereoMode, StereoStyle: a.stereoStyle, StereoNormalize: a.stereoNormalize, ContinuousPlay: a.continuousPlay,
+		StereoMode: a.stereoMode, StereoStyle: a.stereoStyle, DiffuseDots: a.stereoPhosphor.diffuseDots, StereoNormalize: a.stereoNormalize, ContinuousPlay: a.continuousPlay,
 		OutputBackend: a.outputBackend, OutputDeviceName: a.outputDeviceName,
 		WindowX: a.windowX, WindowY: a.windowY, WindowWidth: a.windowW, WindowHeight: a.windowH, WindowMaximized: a.windowMaximized,
 	}
@@ -896,6 +912,7 @@ func (a *App) applyTheme() {
 	a.destroyWaveBrushes()
 	destroyGDICache()
 	setTheme(a.themeMode)
+	a.refreshHelpTheme()
 	if a.hwnd != 0 {
 		setWindowThemeMode(a.hwnd, a.themeMode == 0)
 		invalidate(a.hwnd)
@@ -961,19 +978,33 @@ func (a *App) startEngineSetup() {
 			err = a.engine.Load(runtimeDir, a.hwnd)
 		}
 		if err != nil {
-			a.setStatus("音频引擎启动失败："+err.Error(), true)
+			a.setStatus("Audio engine failed to start: "+err.Error(), true)
 			postMessage(a.hwnd, msgEngineReady, 0, 0)
 			return
 		}
 		a.engineReady.Store(true)
 		appendAppLog("INFO", "audio engine ready")
-		a.setStatus("就绪 · 将音频文件拖入窗口，或点击“打开音频”", false)
+		a.setStatus("Ready · Drag audio here or choose Add Audio.", false)
 		postMessage(a.hwnd, msgEngineReady, 1, 0)
 	}()
 }
 
 func (a *App) handleMessage(hwnd uintptr, msg uint32, wparam, lparam uintptr) (bool, uintptr) {
 	switch msg {
+	case 0x2b, 0x2c:
+		if activePopup.handle(hwnd, msg, lparam) {
+			return true, 1
+		}
+		return false, 0
+	case msgUpdateStartup:
+		a.initUpdates()
+		return true, 0
+	case msgUpdateEvent:
+		a.finishUpdateJob()
+		return true, 0
+	case msgUpdateProgress:
+		a.showDownloadProgress(int(wparam))
+		return true, 0
 	case WM_ERASEBKGND:
 		return true, 1
 	case WM_GETMINMAXINFO:
@@ -1029,7 +1060,7 @@ func (a *App) handleMessage(hwnd uintptr, msg uint32, wparam, lparam uintptr) (b
 			}
 		}
 		procReleaseCapture.Call()
-		if wasLayoutDrag {
+		if wasLayoutDrag || wasVolumeDrag {
 			a.saveLayoutConfig()
 		}
 		if wasPlaylistDrag {
@@ -1047,7 +1078,11 @@ func (a *App) handleMessage(hwnd uintptr, msg uint32, wparam, lparam uintptr) (b
 			return true, 0
 		}
 		x, y := a.physicalToLogicalPoint(loword(lparam), hiword(lparam))
-		a.showPlaylistMenu(x, y)
+		if a.stereoStyle == 1 && pointInRect(x, y, a.layout.Stereo) {
+			a.showDotMenu(x, y)
+		} else {
+			a.showPlaylistMenu(x, y)
+		}
 		return true, 0
 	case WM_MOUSEMOVE:
 		a.trackMouseLeave(hwnd)
@@ -1113,6 +1148,8 @@ func (a *App) handleMessage(hwnd uintptr, msg uint32, wparam, lparam uintptr) (b
 		a.onDrop(wparam)
 		return true, 0
 	case msgEngineReady:
+		a.help.engineSetupDone = true
+		a.autoCheckWhenReady()
 		if wparam == 1 {
 			a.restoreOutputSelection()
 			a.refreshDeviceName()
@@ -1151,6 +1188,9 @@ func (a *App) handleMessage(hwnd uintptr, msg uint32, wparam, lparam uintptr) (b
 		a.saveLayoutConfig()
 		return false, 0
 	case WM_DESTROY:
+		if a.help.cancel != nil {
+			a.help.cancel()
+		}
 		a.captureWindowPlacement(hwnd)
 		a.saveLayoutConfig()
 		a.savePlaylistState()
@@ -1298,36 +1338,6 @@ func loudnessMeterRefreshDue(tick uint64, wasActive, active bool) bool {
 	return (active && tick%6 == 0) || (wasActive && !active)
 }
 
-func (a *App) updateLoudnessRenderClock(playing bool) {
-	a.loudnessRenderElapsed = a.loudnessElapsed
-	if a.engine.InputActive() {
-		// Live input has no transport position. Interpolate the session clock
-		// between ~10 Hz loudness samples using the 8 ms render cadence.
-		a.loudnessRenderElapsed += float64(a.tickCount%12) * 0.008
-		return
-	}
-	if !playing || a.loudnessLastPos < 0 {
-		return
-	}
-	pos := a.engine.PositionSeconds()
-	delta := pos - a.loudnessLastPos
-	if delta >= 0 && delta < 0.75 {
-		a.loudnessRenderElapsed += delta
-		return
-	}
-	// During loop wrap, project through the end of the file so the rolling
-	// history window keeps moving smoothly between 100 ms data samples.
-	if delta < 0 && a.loop {
-		dur := a.engine.DurationSeconds()
-		if dur > 0 && a.loudnessLastPos > dur-0.75 && pos < 0.75 {
-			step := (dur - a.loudnessLastPos) + pos
-			if step >= 0 && step < 0.75 {
-				a.loudnessRenderElapsed += step
-			}
-		}
-	}
-}
-
 func (a *App) onTick(renderTick uint64) {
 	a.tickCount++
 	if a.analyzerView == analyzerViewTrackSpectrogram && a.tickCount%12 == 0 {
@@ -1337,6 +1347,10 @@ func (a *App) onTick(renderTick uint64) {
 		if loading {
 			a.invalidateDynamic(dirtySpectrum, a.layout.Spectrum)
 		}
+	}
+	if !a.volumeSaveAt.IsZero() && !time.Now().Before(a.volumeSaveAt) {
+		a.volumeSaveAt = time.Time{}
+		a.saveLayoutConfig()
 	}
 	if !a.volumePopupUntil.IsZero() && !time.Now().Before(a.volumePopupUntil) {
 		a.volumePopupUntil = time.Time{}
@@ -1376,7 +1390,10 @@ func (a *App) onTick(renderTick uint64) {
 	} else {
 		a.rmsR += (rR - a.rmsR) * 0.046
 	}
-	a.clips = clips
+	if a.clips != clips {
+		a.clips = clips
+		a.invalidateDynamic(dirtyMeter, a.layout.Meter)
+	}
 
 	if loudnessMeterRefresh {
 		// The transition read is essential: a short clip can stop between two
@@ -1384,11 +1401,12 @@ func (a *App) onTick(renderTick uint64) {
 		// after active repainting has ended and never reaches the meter panel.
 		a.updateLoudnessMeasurement()
 	}
+	a.loudnessRenderElapsed = a.historyClock.step(time.Now(), analysisActive)
+	if a.historyClock.pending != 0 {
+		a.loudnessLoopMarkers = a.historyClock.markers(a.loudnessLoopMarkers, a.engine.DurationSeconds(), a.engine.PositionSeconds())
+	}
 	if analysisActive && a.tickCount%12 == 0 {
 		a.appendLoudnessSample()
-	}
-	if a.tickCount%2 == 0 {
-		a.updateLoudnessRenderClock(playing)
 	}
 	if loudnessMeterRefresh {
 		a.updateMeterDisplay()
@@ -1430,12 +1448,12 @@ func (a *App) onTick(renderTick uint64) {
 	} else {
 		updateVUHold(&a.vuHoldL, &a.vuHoldAgeL, maxf(pL, a.peakL))
 		updateVUHold(&a.vuHoldR, &a.vuHoldAgeR, maxf(pR, a.peakR))
-		if a.tickCount%2 == 0 {
+		if a.tickCount%2 == 0 || (analysisStateChanged && a.analyzerView == analyzerViewLiveSpectrogram) {
 			var waveformBands [waveformBandCount]float32
 			acquired := false
 			if a.analyzerView == analyzerViewLiveSpectrogram {
 				fftSize := a.spectrumFFTSize()
-				if fftSize < 8192 || a.tickCount%4 == 0 {
+				if fftSize < 8192 || a.tickCount%4 == 0 || analysisStateChanged {
 					individual, channels := a.engine.FFTIndividual(fftSize)
 					combined := combineIndividualFFT(a.spectrogramScratch[:], individual, channels)
 					rate, _ := a.engine.AnalysisInfo()
@@ -1735,68 +1753,7 @@ func updateSpectrumBand(cur, target, hold float32, holdAge uint16, attack, relea
 }
 
 func (a *App) appendLoudnessSample() {
-	pos := a.engine.PositionSeconds()
-	if a.engine.InputActive() {
-		// A live input has no seekable file timeline; use a stable zero source
-		// position so the existing session clock advances by nominal sample time.
-		pos = 0
-	}
-	if pos < 0 {
-		pos = 0
-	}
-
-	// Loudness History uses an independent, monotonic playback-session clock.
-	// The transport position can jump back to zero when a file loops, so using
-	// it directly as the X coordinate caused later loop passes to land on the
-	// same pixels as earlier passes and overwrite/erase them during aggregation.
-	const nominalStep = 0.096 // ~6 UI ticks at the 16 ms timer cadence.
-	if len(a.loudnessHistory) == 0 {
-		a.loudnessElapsed = nominalStep
-	} else if a.loudnessLastPos < 0 {
-		// Explicit seeks mark a discontinuity and invalidate the previous source
-		// position. Keep session time moving forward without inheriting the seek
-		// distance itself.
-		a.loudnessElapsed += nominalStep
-	} else {
-		delta := pos - a.loudnessLastPos
-		if delta >= -0.05 && delta <= 0.75 {
-			step := delta
-			if step < 0.02 {
-				step = nominalStep
-			}
-			a.loudnessElapsed += step
-		} else if delta < -0.35 {
-			dur := a.engine.DurationSeconds()
-			isLoopWrap := a.loop && dur > 0.15
-			if isLoopWrap {
-				// Preserve a continuous history across the loop point. The marker is
-				// placed at the exact session-time boundary between the old end and
-				// the new beginning.
-				toEnd := dur - a.loudnessLastPos
-				step := toEnd + pos
-				if step < 0.02 || step > 0.75 {
-					step = nominalStep
-				}
-				marker := a.loudnessElapsed + toEnd
-				if toEnd < 0 || toEnd > 0.75 {
-					marker = a.loudnessElapsed + step*0.5
-				}
-				a.loudnessLoopMarkers = append(a.loudnessLoopMarkers, marker)
-				a.loudnessElapsed += step
-			} else {
-				// A real unmarked backward jump should remain a visual break, but it
-				// must not make session time go backwards.
-				a.loudnessSegment++
-				a.loudnessElapsed += nominalStep
-			}
-		} else {
-			// Extreme unmarked forward jumps are treated like seeks.
-			a.loudnessSegment++
-			a.loudnessElapsed += nominalStep
-		}
-	}
-
-	a.loudnessLastPos = pos
+	a.loudnessElapsed = a.historyClock.elapsed
 	sample := LoudnessSample{
 		Time:       a.loudnessElapsed,
 		Momentary:  a.lufsM,
@@ -1824,16 +1781,11 @@ func (a *App) appendLoudnessSample() {
 			}
 		}
 	}
-	if len(a.loudnessLoopMarkers) > 4096 {
-		drop := len(a.loudnessLoopMarkers) - 4096
-		copy(a.loudnessLoopMarkers, a.loudnessLoopMarkers[drop:])
-		a.loudnessLoopMarkers = a.loudnessLoopMarkers[:4096]
-	}
 }
 
 func (a *App) markLoudnessDiscontinuity() {
 	a.loudnessSegment++
-	a.loudnessLastPos = -1
+	a.historyClock.pending = 0
 	a.stereoNormalizeGain = 1
 	a.stereoPhosphor.reset()
 	a.resetLiveSpectrogram()
@@ -2094,6 +2046,9 @@ func (a *App) resetSpectrumState() {
 func (a *App) cycleSpectrumFFT() {
 	a.spectrumFFT = (a.spectrumFFT + 1) % 4
 	a.resetSpectrumState()
+	if a.analyzerView == analyzerViewLiveSpectrogram {
+		a.resetLiveSpectrogram()
+	}
 	a.saveLayoutConfig()
 }
 
@@ -2363,8 +2318,8 @@ func maxf(a, b float32) float32 {
 
 func (a *App) openFilesDialog() {
 	buf := make([]uint16, 65536)
-	filter := multiString("音频文件", "*.wav;*.wave;*.aif;*.aiff;*.flac;*.mp3;*.ogg;*.m4a;*.aac;*.wma;*.opus", "所有文件", "*.*")
-	ofn := OPENFILENAME{LStructSize: uint32(unsafe.Sizeof(OPENFILENAME{})), HwndOwner: a.hwnd, LpstrFilter: &filter[0], LpstrFile: &buf[0], NMaxFile: uint32(len(buf)), Flags: OFN_EXPLORER | OFN_ALLOWMULTISELECT | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY, LpstrTitle: utf16Ptr("选择音频文件")}
+	filter := multiString(tr("音频文件"), "*.wav;*.wave;*.aif;*.aiff;*.flac;*.mp3;*.ogg;*.m4a;*.aac;*.wma;*.opus", tr("所有文件"), "*.*")
+	ofn := OPENFILENAME{LStructSize: uint32(unsafe.Sizeof(OPENFILENAME{})), HwndOwner: a.hwnd, LpstrFilter: &filter[0], LpstrFile: &buf[0], NMaxFile: uint32(len(buf)), Flags: OFN_EXPLORER | OFN_ALLOWMULTISELECT | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY, LpstrTitle: utf16Ptr(tr("选择音频文件"))}
 	r, _, _ := procGetOpenFileNameW.Call(uintptr(unsafe.Pointer(&ofn)))
 	if r == 0 {
 		return
@@ -2430,7 +2385,7 @@ func (a *App) addFilesToPlaylist(playlistID string, paths []string, autoPlay boo
 		valid = append(valid, track.Path)
 	}
 	if len(valid) == 0 {
-		a.setStatus("没有找到支持的音频文件", true)
+		a.setStatus("No supported audio files found.", true)
 		return
 	}
 
@@ -2492,7 +2447,7 @@ func (a *App) loadTrack(index int, play bool) {
 
 func (a *App) loadTrackFromPlaylist(playlistID string, index int, play bool) {
 	if !a.engineReady.Load() {
-		a.setStatus("音频引擎尚未就绪", true)
+		a.setStatus("The audio engine is not ready.", true)
 		return
 	}
 	p := a.playlistByID(playlistID)
@@ -2503,7 +2458,7 @@ func (a *App) loadTrackFromPlaylist(playlistID string, index int, play bool) {
 	info, statErr := os.Stat(path)
 	if statErr != nil || info.IsDir() {
 		p.Tracks[index].Missing = true
-		a.setStatus("文件不可用："+path, true)
+		a.setStatus("File unavailable: "+path, true)
 		a.savePlaylistState()
 		invalidate(a.hwnd)
 		return
@@ -2540,7 +2495,10 @@ func (a *App) loadTrackFromPlaylist(playlistID string, index int, play bool) {
 	a.loudnessLabelInit = false
 	a.loudnessElapsed = 0
 	a.loudnessRenderElapsed = 0
-	a.loudnessLastPos = -1
+	a.historyClock = historyClock{}
+	if play {
+		a.historyClock.step(time.Now(), true)
+	}
 	a.loudnessSegment = 0
 	a.stereoPointCount = 0
 	a.stereoNormalizeGain = 1
@@ -2724,7 +2682,7 @@ func (a *App) startWaveform(path string) {
 		}
 		a.spectrogramMu.Unlock()
 		if err != nil {
-			a.setStatus("音频已打开，但波形生成失败："+err.Error(), true)
+			a.setStatus("Audio opened, but waveform generation failed: "+err.Error(), true)
 		} else {
 			saveWaveformCache(path, waveformBins, waveform)
 			saveSpectrogramCache(path, spectrogram)
@@ -2837,10 +2795,23 @@ func (a *App) onPlaybackEnded(generation uint64, stream uint32) {
 	if !a.engine.MatchesPlaybackEnd(generation, stream) {
 		return
 	}
+	if a.loop && !a.manualStop && a.current >= 0 && !a.engine.InputActive() {
+		a.historyClock.pending++
+		return
+	}
 	if a.manualStop || a.current < 0 || a.loop || !a.continuousPlay {
 		return
 	}
 	a.nextTrack(true)
+}
+func (a *App) togglePlayback() {
+	if err := a.engine.PlayPause(); err != nil {
+		a.setStatus(err.Error(), true)
+		return
+	}
+	if a.engine.IsPlaying() {
+		a.manualStop = false
+	}
 }
 func (a *App) clearCurrentVisualState() {
 	atomic.AddUint64(&a.waveToken, 1)
@@ -2868,7 +2839,7 @@ func (a *App) clearCurrentVisualState() {
 	a.loudnessLabelInit = false
 	a.loudnessElapsed = 0
 	a.loudnessRenderElapsed = 0
-	a.loudnessLastPos = -1
+	a.historyClock = historyClock{}
 	a.loudnessSegment = 0
 	a.stereoPointCount = 0
 	a.stereoNormalizeGain = 1
@@ -2930,7 +2901,7 @@ func (a *App) clearPlaylist() {
 		return
 	}
 	a.playlistSel.reset()
-	if messageBoxResult(a.hwnd, "确定要清空 Playlist “"+p.Name+"” 吗？", "Auralux Player", MB_YESNO|MB_ICONQUESTION) != IDYES {
+	if messageBoxResult(a.hwnd, tr("确定要清空 Playlist “")+p.Name+tr("” 吗？"), "Auralux Player", MB_YESNO|MB_ICONQUESTION) != IDYES {
 		return
 	}
 	clearsPlayback := p.ID == a.playbackPlaylistID
@@ -2946,7 +2917,7 @@ func (a *App) clearPlaylist() {
 		a.clearCurrentVisualState()
 		setWindowText(a.hwnd, appTitle)
 	}
-	a.setStatus("Playlist 已清空", false)
+	a.setStatus("Playlist cleared.", false)
 	a.savePlaylistState()
 	invalidate(a.hwnd)
 }
@@ -3039,7 +3010,7 @@ func (a *App) switchPlaylistByWheel(delta int32) {
 
 func (a *App) createPlaylist() {
 	initial := nextPlaylistName(a.playlists)
-	name, ok := promptPlaylistName(a, "新建 Playlist", initial, func(value string) string {
+	name, ok := promptPlaylistName(a, tr("新建 Playlist"), initial, func(value string) string {
 		_, reason := a.validatePlaylistName(value, "")
 		return reason
 	})
@@ -3051,7 +3022,7 @@ func (a *App) createPlaylist() {
 	a.playlists = append(a.playlists, p)
 	a.activePlaylistID = p.ID
 	a.savePlaylistState()
-	a.setStatus("已新建 Playlist："+name, false)
+	a.setStatus("Created playlist: "+name, false)
 	invalidate(a.hwnd)
 }
 
@@ -3060,7 +3031,7 @@ func (a *App) renameActivePlaylist() {
 	if p == nil || p.ID == defaultPlaylistID {
 		return
 	}
-	name, ok := promptPlaylistName(a, "重命名 Playlist", p.Name, func(value string) string {
+	name, ok := promptPlaylistName(a, tr("重命名 Playlist"), p.Name, func(value string) string {
 		_, reason := a.validatePlaylistName(value, p.ID)
 		return reason
 	})
@@ -3070,7 +3041,7 @@ func (a *App) renameActivePlaylist() {
 	name, _ = a.validatePlaylistName(name, p.ID)
 	p.Name = name
 	a.savePlaylistState()
-	a.setStatus("Playlist 已重命名为："+name, false)
+	a.setStatus("Renamed playlist: "+name, false)
 	invalidate(a.hwnd)
 }
 
@@ -3079,9 +3050,9 @@ func (a *App) deleteActivePlaylist() {
 	if p == nil || p.ID == defaultPlaylistID {
 		return
 	}
-	message := "确定要删除 Playlist “" + p.Name + "” 吗？\n列表中的文件不会从磁盘删除。"
+	message := tr("确定要删除 Playlist “") + p.Name + tr("” 吗？\n列表中的文件不会从磁盘删除。")
 	if p.ID == a.playbackPlaylistID {
-		message = "Playlist “" + p.Name + "” 正在提供当前播放内容。\n删除后将停止播放，确定继续吗？"
+		message = "Playlist “" + p.Name + tr("” 正在提供当前播放内容。\n删除后将停止播放，确定继续吗？")
 	}
 	if messageBoxResult(a.hwnd, message, "Auralux Player", MB_YESNO|MB_ICONQUESTION) != IDYES {
 		return
@@ -3105,7 +3076,7 @@ func (a *App) deleteActivePlaylist() {
 		setWindowText(a.hwnd, appTitle)
 	}
 	a.savePlaylistState()
-	a.setStatus("Playlist 已删除", false)
+	a.setStatus("Playlist deleted.", false)
 	invalidate(a.hwnd)
 }
 
@@ -3191,11 +3162,12 @@ func (a *App) onMouseDown(x, y int32) {
 		p := a.activePlaylist()
 		if a.current < 0 && p != nil && len(p.Tracks) > 0 {
 			a.loadTrack(maxi(p.Selected, 0), true)
-		} else if err := a.engine.PlayPause(); err != nil {
-			a.setStatus(err.Error(), true)
+		} else {
+			a.togglePlayback()
 		}
 	case pointInRect(x, y, l.StopBtn):
 		a.manualStop = true
+		a.historyClock.pending = 0
 		a.engine.Stop()
 	case pointInRect(x, y, l.NextBtn):
 		a.nextTrack(false)
@@ -3207,6 +3179,8 @@ func (a *App) onMouseDown(x, y int32) {
 		a.saveLayoutConfig()
 	case pointInRect(x, y, l.ThemeBtn):
 		a.toggleTheme()
+	case pointInRect(x, y, logoMenuRect(l.Header)):
+		a.helpMenu()
 	case pointInRect(x, y, l.Loudness5Btn):
 		a.setLoudnessWindow(0)
 	case pointInRect(x, y, l.Loudness15Btn):
@@ -3223,7 +3197,7 @@ func (a *App) onMouseDown(x, y int32) {
 		a.cycleAnalyzerView()
 	case a.analyzerView != analyzerViewSpectrum && pointInRect(x, y, l.SpectrogramScaleBtn):
 		a.cycleSpectrogramScale()
-	case a.analyzerView == analyzerViewSpectrum && pointInRect(x, y, l.SpectrumFFTBtn):
+	case a.analyzerView != analyzerViewTrackSpectrogram && pointInRect(x, y, l.SpectrumFFTBtn):
 		a.cycleSpectrumFFT()
 	case a.analyzerView == analyzerViewSpectrum && pointInRect(x, y, l.SpectrumSmoothBtn):
 		a.cycleSpectrumSmoothing()
@@ -3278,7 +3252,7 @@ func (a *App) onMouseDown(x, y int32) {
 		a.loudnessLoopMarkers = nil
 		a.loudnessElapsed = 0
 		a.loudnessRenderElapsed = 0
-		a.loudnessLastPos = -1
+		a.historyClock = historyClock{}
 		a.loudnessSegment = 0
 		a.correlation = 0
 		a.correlationDisplay = 0
@@ -3425,46 +3399,46 @@ func escapePowerShellSingleQuoted(s string) string {
 func (a *App) copySelectedFilePath() {
 	track, _ := a.selectedFileInfoTrack()
 	if track == nil {
-		a.setStatus("没有可复制路径的文件", true)
+		a.setStatus("No file paths to copy.", true)
 		return
 	}
 	path := track.Path
 	cmd := exec.Command("powershell", "-NoProfile", "-Command", "Set-Clipboard -Value '"+escapePowerShellSingleQuoted(path)+"'")
 	if err := cmd.Run(); err != nil {
-		a.setStatus("复制路径失败: "+err.Error(), true)
+		a.setStatus("Could not copy path: "+err.Error(), true)
 		return
 	}
-	a.setStatus("已复制文件路径", false)
+	a.setStatus("File path copied.", false)
 }
 
 func (a *App) openTrackFolder(idx int) {
 	p := a.activePlaylist()
 	if p == nil || idx < 0 || idx >= len(p.Tracks) {
-		a.setStatus("没有可打开目录的文件", true)
+		a.setStatus("No file location to open.", true)
 		return
 	}
 	dir := filepath.Dir(p.Tracks[idx].Path)
 	cmd := exec.Command("explorer.exe", dir)
 	if err := cmd.Start(); err != nil {
-		a.setStatus("打开文件夹失败: "+err.Error(), true)
+		a.setStatus("Could not open folder: "+err.Error(), true)
 		return
 	}
-	a.setStatus("已打开所在文件夹", false)
+	a.setStatus("Opened containing folder.", false)
 }
 
 func (a *App) openSelectedFileFolder() {
 	track, _ := a.selectedFileInfoTrack()
 	if track == nil {
-		a.setStatus("没有可打开目录的文件", true)
+		a.setStatus("No file location to open.", true)
 		return
 	}
 	dir := filepath.Dir(track.Path)
 	cmd := exec.Command("explorer.exe", dir)
 	if err := cmd.Start(); err != nil {
-		a.setStatus("打开文件夹失败: "+err.Error(), true)
+		a.setStatus("Could not open folder: "+err.Error(), true)
 		return
 	}
-	a.setStatus("已打开所在文件夹", false)
+	a.setStatus("Opened containing folder.", false)
 }
 
 func (a *App) resizePlaylist(x int32) {
@@ -3695,21 +3669,33 @@ func (a *App) volumeAt(x int32) {
 	a.engine.SetVolume(ratio)
 }
 
+// Coalesce wheel and key repeats; normal close also flushes the layout.
+func (a *App) setPlaybackVolume(v float32) {
+	previous := a.engine.Volume()
+	a.engine.SetVolume(v)
+	v = a.engine.Volume()
+	if v == previous {
+		return
+	}
+	if v > 0.001 {
+		a.lastNonZeroVolume = v
+	} else if previous > 0.001 {
+		a.lastNonZeroVolume = previous
+	}
+	a.volumeSaveAt = time.Now().Add(350 * time.Millisecond)
+}
+
 func (a *App) toggleMute() {
 	v := a.engine.Volume()
 	if v > 0.001 {
-		a.lastNonZeroVolume = v
-		a.engine.SetVolume(0)
+		a.setPlaybackVolume(0)
 		return
 	}
 	restore := a.lastNonZeroVolume
 	if restore <= 0.001 {
-		restore = 0.8
+		restore = defaultPlaybackVolume
 	}
-	if restore > 1 {
-		restore = 1
-	}
-	a.engine.SetVolume(restore)
+	a.setPlaybackVolume(restore)
 }
 
 const playlistRowHeight int32 = 54
@@ -3904,7 +3890,7 @@ func (a *App) tryStartPlaylistDragOut(x, y int32) bool {
 		return false
 	}
 	if !a.oleReady {
-		a.setStatus("当前系统无法启动文件拖放", true)
+		a.setStatus("File drag and drop is unavailable.", true)
 		return false
 	}
 	procReleaseCapture.Call()
@@ -3915,7 +3901,7 @@ func (a *App) tryStartPlaylistDragOut(x, y int32) bool {
 	a.hover = hoverOutsidePoint()
 	a.hoverDirty = true
 	if effect&DROPEFFECT_COPY != 0 {
-		a.setStatus(fmt.Sprintf("已拖出 %d 个文件", len(paths)), false)
+		a.setStatus(fmt.Sprintf("Dragged out %d files.", len(paths)), false)
 	}
 	invalidate(a.hwnd)
 	return true
@@ -3926,18 +3912,42 @@ func (a *App) tryStartPlaylistDragOut(x, y int32) bool {
 func (a *App) copySelectedTracksToClipboard() {
 	paths := a.selectedTrackPaths()
 	if len(paths) == 0 {
-		a.setStatus("没有可复制的文件", true)
+		a.setStatus("No files to copy.", true)
 		return
 	}
 	if !a.oleReady {
-		a.setStatus("当前系统无法写入文件剪贴板", true)
+		a.setStatus("Cannot write files to the clipboard.", true)
 		return
 	}
 	if err := copyFilesToClipboard(a.hwnd, paths); err != nil {
-		a.setStatus("复制文件失败: "+err.Error(), true)
+		a.setStatus("Could not copy files: "+err.Error(), true)
 		return
 	}
-	a.setStatus(fmt.Sprintf("已复制 %d 个文件到剪贴板", len(paths)), false)
+	a.setStatus(fmt.Sprintf("Copied %d files to the clipboard.", len(paths)), false)
+}
+
+func (a *App) showDotMenu(x, y int32) {
+	m, _, _ := procCreatePopupMenu.Call()
+	if m == 0 {
+		return
+	}
+	defer procDestroyMenu.Call(m)
+	for i, k := range []string{"DOT: focused", "DOT: diffuse"} {
+		flags := uintptr(MF_STRING)
+		if (i == 1) == a.stereoPhosphor.diffuseDots {
+			flags |= MF_CHECKED
+		}
+		procAppendMenuW.Call(m, flags, uintptr(i+1), uintptr(unsafe.Pointer(utf16Ptr(tr(k)))))
+	}
+	pt := POINT{scaleDPI(x, a.currentDPI()), scaleDPI(y, a.currentDPI())}
+	procClientToScreen.Call(a.hwnd, uintptr(unsafe.Pointer(&pt)))
+	cmd := a.trackPopup(m, TPM_RETURNCMD, pt)
+	if cmd == 1 || cmd == 2 {
+		a.stereoPhosphor.diffuseDots = cmd == 2
+		a.stereoPhosphor.reset()
+		a.saveLayoutConfig()
+		invalidate(a.hwnd)
+	}
 }
 
 func (a *App) showPlaylistMenu(x, y int32) {
@@ -3956,9 +3966,9 @@ func (a *App) showPlaylistMenu(x, y int32) {
 		return
 	}
 	defer procDestroyMenu.Call(menu)
-	procAppendMenuW.Call(menu, MF_STRING, 2101, uintptr(unsafe.Pointer(utf16Ptr("播放"))))
-	procAppendMenuW.Call(menu, MF_STRING, 2106, uintptr(unsafe.Pointer(utf16Ptr("打开文件目录"))))
-	procAppendMenuW.Call(menu, MF_STRING, 2107, uintptr(unsafe.Pointer(utf16Ptr("复制文件到剪贴板"))))
+	procAppendMenuW.Call(menu, MF_STRING, 2101, uintptr(unsafe.Pointer(utf16Ptr(tr("播放")))))
+	procAppendMenuW.Call(menu, MF_STRING, 2106, uintptr(unsafe.Pointer(utf16Ptr(tr("打开文件目录")))))
+	procAppendMenuW.Call(menu, MF_STRING, 2107, uintptr(unsafe.Pointer(utf16Ptr(tr("复制文件到剪贴板")))))
 	procAppendMenuW.Call(menu, MF_SEPARATOR, 0, 0)
 	// Reordering only makes sense for a single row; a multi-selection is meant
 	// to be dragged out or removed as a group.
@@ -3966,14 +3976,14 @@ func (a *App) showPlaylistMenu(x, y int32) {
 	if multi {
 		moveFlags |= MF_GRAYED
 	}
-	procAppendMenuW.Call(menu, moveFlags, 2102, uintptr(unsafe.Pointer(utf16Ptr("上移"))))
-	procAppendMenuW.Call(menu, moveFlags, 2103, uintptr(unsafe.Pointer(utf16Ptr("下移"))))
-	procAppendMenuW.Call(menu, MF_STRING, 2104, uintptr(unsafe.Pointer(utf16Ptr("从播放列表移除"))))
+	procAppendMenuW.Call(menu, moveFlags, 2102, uintptr(unsafe.Pointer(utf16Ptr(tr("上移")))))
+	procAppendMenuW.Call(menu, moveFlags, 2103, uintptr(unsafe.Pointer(utf16Ptr(tr("下移")))))
+	procAppendMenuW.Call(menu, MF_STRING, 2104, uintptr(unsafe.Pointer(utf16Ptr(tr("从播放列表移除")))))
 	procAppendMenuW.Call(menu, MF_SEPARATOR, 0, 0)
-	procAppendMenuW.Call(menu, MF_STRING, 2105, uintptr(unsafe.Pointer(utf16Ptr("清空播放列表"))))
+	procAppendMenuW.Call(menu, MF_STRING, 2105, uintptr(unsafe.Pointer(utf16Ptr(tr("清空播放列表")))))
 	var pt POINT
 	procGetCursorPos.Call(uintptr(unsafe.Pointer(&pt)))
-	cmd, _, _ := procTrackPopupMenu.Call(menu, TPM_LEFTALIGN|TPM_TOPALIGN|TPM_RETURNCMD, uintptr(pt.X), uintptr(pt.Y), 0, a.hwnd, 0)
+	cmd := a.trackPopup(menu, TPM_LEFTALIGN|TPM_TOPALIGN|TPM_RETURNCMD, pt)
 	switch cmd {
 	case 2101:
 		a.loadTrack(p.Selected, true)
@@ -4160,16 +4170,17 @@ func (a *App) onWheel(delta int32, flags uint16, x, y int32) {
 	if v > 1 {
 		v = 1
 	}
-	a.engine.SetVolume(v)
-	if v > 0.001 {
-		a.lastNonZeroVolume = v
-	}
+	a.setPlaybackVolume(v)
 	// Keep the percentage visible briefly after the last wheel event.
 	a.volumePopupUntil = time.Now().Add(900 * time.Millisecond)
 	a.invalidateDynamic(dirtyControls, a.layout.Controls)
 }
 
 func (a *App) onKey(key uint32) {
+	if key == 0x70 {
+		a.showHelpPage("guide")
+		return
+	} // F1
 	if key == VK_ESCAPE && a.playlistMenuOpen {
 		a.playlistMenuOpen = false
 		invalidateArea(a.hwnd, a.layout.Playlist)
@@ -4181,7 +4192,7 @@ func (a *App) onKey(key uint32) {
 		if a.current < 0 && p != nil && len(p.Tracks) > 0 {
 			a.loadTrack(maxi(p.Selected, 0), true)
 		} else {
-			a.engine.PlayPause()
+			a.togglePlayback()
 		}
 	case VK_LEFT:
 		a.markLoudnessDiscontinuity()
@@ -4190,9 +4201,9 @@ func (a *App) onKey(key uint32) {
 		a.markLoudnessDiscontinuity()
 		a.engine.SeekSeconds(a.engine.PositionSeconds() + 5)
 	case VK_UP:
-		a.engine.SetVolume(a.engine.Volume() + 0.05)
+		a.setPlaybackVolume(a.engine.Volume() + 0.05)
 	case VK_DOWN:
-		a.engine.SetVolume(a.engine.Volume() - 0.05)
+		a.setPlaybackVolume(a.engine.Volume() - 0.05)
 	case VK_DELETE:
 		a.removeSelected()
 	case VK_HOME:
@@ -4270,7 +4281,7 @@ func (a *App) restoreOutputSelection() {
 		for _, d := range a.engine.ASIODevices() {
 			if strings.EqualFold(strings.TrimSpace(d.Name), wanted) {
 				if err := a.engine.SwitchASIODevice(d.Index); err != nil {
-					a.setStatus("无法恢复 ASIO 输出："+err.Error(), true)
+					a.setStatus("Could not restore ASIO output: "+err.Error(), true)
 				}
 				return
 			}
@@ -4280,7 +4291,7 @@ func (a *App) restoreOutputSelection() {
 	for _, d := range a.engine.Devices() {
 		if strings.EqualFold(strings.TrimSpace(d.Name), wanted) {
 			if err := a.engine.SwitchDevice(d.Index); err != nil {
-				a.setStatus("无法恢复输出设备："+err.Error(), true)
+				a.setStatus("Could not restore output device: "+err.Error(), true)
 			}
 			return
 		}
@@ -4334,7 +4345,7 @@ func (a *App) resetLiveAnalysisView() {
 	a.loudnessLoopMarkers = nil
 	a.loudnessLabelInit = false
 	a.loudnessElapsed, a.loudnessRenderElapsed = 0, 0
-	a.loudnessLastPos = -1
+	a.historyClock = historyClock{}
 	a.loudnessSegment = 0
 	a.stereoPointCount = 0
 	a.stereoNormalizeGain = 1
@@ -4374,18 +4385,18 @@ func (a *App) showInputMenu() {
 	if mode == INPUT_NONE {
 		noneFlags |= MF_CHECKED
 	}
-	procAppendMenuW.Call(menu, noneFlags, 3000, uintptr(unsafe.Pointer(utf16Ptr("NONE · 关闭输入监测"))))
+	procAppendMenuW.Call(menu, noneFlags, 3000, uintptr(unsafe.Pointer(utf16Ptr(tr("NONE · 关闭输入监测")))))
 	procAppendMenuW.Call(menu, MF_SEPARATOR, 0, 0)
-	procAppendMenuW.Call(menu, MF_STRING|MF_GRAYED, 0, uintptr(unsafe.Pointer(utf16Ptr("系统输入设备"))))
+	procAppendMenuW.Call(menu, MF_STRING|MF_GRAYED, 0, uintptr(unsafe.Pointer(utf16Ptr(tr("系统输入设备")))))
 	systemInputs := a.engine.InputDevices()
 	currentSystem := a.engine.CurrentInputDevice()
 	if len(systemInputs) == 0 {
-		procAppendMenuW.Call(menu, MF_STRING|MF_GRAYED, 0, uintptr(unsafe.Pointer(utf16Ptr("未检测到系统输入设备"))))
+		procAppendMenuW.Call(menu, MF_STRING|MF_GRAYED, 0, uintptr(unsafe.Pointer(utf16Ptr(tr("未检测到系统输入设备")))))
 	} else {
 		for i, d := range systemInputs {
 			name := d.Name
 			if d.Default {
-				name += "  · Default"
+				name += tr("  · Default")
 			}
 			flags := uintptr(MF_STRING)
 			if mode == INPUT_SYSTEM && d.Index == currentSystem {
@@ -4396,11 +4407,11 @@ func (a *App) showInputMenu() {
 	}
 
 	procAppendMenuW.Call(menu, MF_SEPARATOR, 0, 0)
-	procAppendMenuW.Call(menu, MF_STRING|MF_GRAYED, 0, uintptr(unsafe.Pointer(utf16Ptr("ASIO 输入 · 通道 1/2"))))
+	procAppendMenuW.Call(menu, MF_STRING|MF_GRAYED, 0, uintptr(unsafe.Pointer(utf16Ptr(tr("ASIO 输入 · 通道 1/2")))))
 	asioInputs := a.engine.ASIODevices()
 	currentASIO := a.engine.CurrentInputASIODevice()
 	if len(asioInputs) == 0 {
-		procAppendMenuW.Call(menu, MF_STRING|MF_GRAYED, 0, uintptr(unsafe.Pointer(utf16Ptr("未检测到 ASIO 驱动"))))
+		procAppendMenuW.Call(menu, MF_STRING|MF_GRAYED, 0, uintptr(unsafe.Pointer(utf16Ptr(tr("未检测到 ASIO 驱动")))))
 	} else {
 		for i, d := range asioInputs {
 			flags := uintptr(MF_STRING)
@@ -4414,14 +4425,14 @@ func (a *App) showInputMenu() {
 	inputRect := a.logicalToPhysicalRect(a.layout.InputBtn)
 	pt := POINT{inputRect.Left, inputRect.Bottom}
 	procClientToScreen.Call(a.hwnd, uintptr(unsafe.Pointer(&pt)))
-	cmd, _, _ := procTrackPopupMenu.Call(menu, TPM_LEFTALIGN|TPM_TOPALIGN|TPM_RETURNCMD, uintptr(pt.X), uintptr(pt.Y), 0, a.hwnd, 0)
+	cmd := a.trackPopup(menu, TPM_LEFTALIGN|TPM_TOPALIGN|TPM_RETURNCMD, pt)
 	switch {
 	case cmd == 3000:
 		a.engine.StopInput()
 		a.inputBackend = INPUT_NONE
 		a.inputDeviceName = "NONE"
 		a.resetLiveAnalysisView()
-		a.setStatus("输入监测已关闭 · Analyzer 返回播放器", false)
+		a.setStatus("Input monitoring off · Analyzing player output", false)
 	case cmd >= 3100 && int(cmd-3100) < len(systemInputs):
 		d := systemInputs[int(cmd-3100)]
 		if err := a.engine.StartSystemInput(d.Index); err != nil {
@@ -4431,7 +4442,7 @@ func (a *App) showInputMenu() {
 			a.inputDeviceName = d.Name
 			a.resetLiveAnalysisView()
 			rate, ch := a.engine.AnalysisInfo()
-			a.setStatus(fmt.Sprintf("系统输入监测：%s · %.1f kHz · %d ch", d.Name, float64(rate)/1000, ch), false)
+			a.setStatus(fmt.Sprintf("System input: %s · %.1f kHz · %d ch", d.Name, float64(rate)/1000, ch), false)
 		}
 	case cmd >= 4100 && int(cmd-4100) < len(asioInputs):
 		d := asioInputs[int(cmd-4100)]
@@ -4442,7 +4453,7 @@ func (a *App) showInputMenu() {
 			a.inputDeviceName = d.Name
 			a.resetLiveAnalysisView()
 			rate, ch := a.engine.AnalysisInfo()
-			a.setStatus(fmt.Sprintf("ASIO 输入监测：%s · %.1f kHz · %d ch", d.Name, float64(rate)/1000, ch), false)
+			a.setStatus(fmt.Sprintf("ASIO input: %s · %.1f kHz · %d ch", d.Name, float64(rate)/1000, ch), false)
 		}
 	}
 	invalidate(a.hwnd)
@@ -4475,7 +4486,7 @@ func (a *App) showDeviceMenu() {
 	for i, d := range systemDevices {
 		name := d.Name
 		if d.Default {
-			name += "（系统默认）"
+			name += tr("（系统默认）")
 		}
 		flags := uintptr(MF_STRING)
 		if mode == OUTPUT_SYSTEM && d.Index == currentSystem {
@@ -4487,7 +4498,7 @@ func (a *App) showDeviceMenu() {
 	procAppendMenuW.Call(menu, MF_SEPARATOR, 0, 0)
 	currentASIO := a.engine.CurrentASIODevice()
 	if len(asioDevices) == 0 {
-		procAppendMenuW.Call(menu, MF_STRING|MF_GRAYED, 0, uintptr(unsafe.Pointer(utf16Ptr("ASIO · 未检测到驱动"))))
+		procAppendMenuW.Call(menu, MF_STRING|MF_GRAYED, 0, uintptr(unsafe.Pointer(utf16Ptr(tr("ASIO · 未检测到驱动")))))
 	} else {
 		for i, d := range asioDevices {
 			name := "ASIO · " + d.Name
@@ -4499,14 +4510,14 @@ func (a *App) showDeviceMenu() {
 		}
 		if mode == OUTPUT_ASIO {
 			procAppendMenuW.Call(menu, MF_SEPARATOR, 0, 0)
-			procAppendMenuW.Call(menu, MF_STRING, 2900, uintptr(unsafe.Pointer(utf16Ptr("ASIO 控制面板…"))))
+			procAppendMenuW.Call(menu, MF_STRING, 2900, uintptr(unsafe.Pointer(utf16Ptr(tr("ASIO 控制面板…")))))
 		}
 	}
 
 	deviceRect := a.logicalToPhysicalRect(a.layout.DeviceBtn)
 	pt := POINT{deviceRect.Left, deviceRect.Bottom}
 	procClientToScreen.Call(a.hwnd, uintptr(unsafe.Pointer(&pt)))
-	cmd, _, _ := procTrackPopupMenu.Call(menu, TPM_LEFTALIGN|TPM_TOPALIGN|TPM_RETURNCMD, uintptr(pt.X), uintptr(pt.Y), 0, a.hwnd, 0)
+	cmd := a.trackPopup(menu, TPM_LEFTALIGN|TPM_TOPALIGN|TPM_RETURNCMD, pt)
 	switch {
 	case cmd >= 1000 && int(cmd-1000) < len(systemDevices):
 		d := systemDevices[int(cmd-1000)]
@@ -4518,7 +4529,7 @@ func (a *App) showDeviceMenu() {
 			a.resetLiveAnalysisView()
 			a.refreshDeviceName()
 			a.saveLayoutConfig()
-			a.setStatus("系统输出："+d.Name, false)
+			a.setStatus("System output: "+d.Name, false)
 		}
 	case cmd >= 2000 && int(cmd-2000) < len(asioDevices):
 		d := asioDevices[int(cmd-2000)]
@@ -4530,7 +4541,7 @@ func (a *App) showDeviceMenu() {
 			a.resetLiveAnalysisView()
 			a.refreshDeviceName()
 			a.saveLayoutConfig()
-			a.setStatus("ASIO 输出："+d.Name+" · 通道 1/2", false)
+			a.setStatus("ASIO output: "+d.Name+" · Channels 1/2", false)
 		}
 	case cmd == 2900:
 		if err := a.engine.ASIOControlPanel(); err != nil {

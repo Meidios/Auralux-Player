@@ -100,24 +100,7 @@ func cancelNameDialog(state *nameDialogState) {
 }
 
 func drawNameDialogButton(dc uintptr, state *nameDialogState, r RECT, label string, kind int, primary bool) {
-	hovered := state.hoverButton == kind
-	fillColor := cSurfaceRaised
-	borderColor := cBorder
-	textColor := cText
-	if primary {
-		fillColor = cAccent
-		borderColor = cAccent2
-		textColor = rgb(255, 255, 255)
-		if hovered {
-			fillColor = cAccent2
-		}
-	} else if hovered {
-		fillColor = cPanel2
-		borderColor = cAccent2
-	}
-	fillRound(dc, r, scaleDPI(6, state.dpi), fillColor)
-	strokeRound(dc, r, scaleDPI(6, state.dpi), borderColor, 1)
-	text(dc, label, r, state.fontButton, textColor, DT_CENTER|DT_VCENTER|DT_SINGLELINE)
+	drawDialogButton(dc, r, label, state.fontButton, state.dpi, state.hoverButton == kind, false, primary, false)
 }
 
 func paintNameDialog(hwnd uintptr, state *nameDialogState) {
@@ -129,13 +112,13 @@ func paintNameDialog(hwnd uintptr, state *nameDialogState) {
 	defer procEndPaint.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
 	var client RECT
 	procGetClientRect.Call(hwnd, uintptr(unsafe.Pointer(&client)))
-	fill(dc, client, cPanel)
+	fill(dc, client, cBG)
 	dpi := state.dpi
-	text(dc, "Playlist 名称", makeRect(scaleDPI(20, dpi), scaleDPI(17, dpi), scaleDPI(380, dpi), scaleDPI(22, dpi)), state.fontBody, cMuted, DT_LEFT|DT_VCENTER|DT_SINGLELINE)
+	text(dc, tr("Playlist 名称"), makeRect(scaleDPI(20, dpi), scaleDPI(17, dpi), scaleDPI(380, dpi), scaleDPI(22, dpi)), state.fontBody, cMuted, DT_LEFT|DT_VCENTER|DT_SINGLELINE)
 	input := nameDialogInputRect(dpi)
 	fillRound(dc, input, scaleDPI(6, dpi), cSurfaceDeep)
 	strokeRound(dc, input, scaleDPI(6, dpi), cAccent2, 1)
-	message := "最长 64 个字符，名称不可重复"
+	message := tr("最长 64 个字符，名称不可重复")
 	messageColor := cFaint
 	if state.errorMessage != "" {
 		message = state.errorMessage
@@ -143,8 +126,8 @@ func paintNameDialog(hwnd uintptr, state *nameDialogState) {
 	}
 	text(dc, message, makeRect(scaleDPI(22, dpi), scaleDPI(87, dpi), scaleDPI(376, dpi), scaleDPI(20, dpi)), state.fontSmall, messageColor, DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS)
 	ok, cancel := nameDialogButtonRects(dpi)
-	drawNameDialogButton(dc, state, ok, "确定", 1, true)
-	drawNameDialogButton(dc, state, cancel, "取消", 2, false)
+	drawNameDialogButton(dc, state, ok, tr("确定"), 1, true)
+	drawNameDialogButton(dc, state, cancel, tr("取消"), 2, false)
 }
 
 func nameDialogWndProc(hwnd uintptr, msg uint32, wparam, lparam uintptr) uintptr {

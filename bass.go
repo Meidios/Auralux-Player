@@ -265,16 +265,19 @@ var globalRecordCallback uintptr
 var globalVolumeDSPCallback uintptr
 var globalPlaybackEndCallback uintptr
 
+const defaultPlaybackVolume = 1.0
+const maxPlaybackVolume = 1.25
+
 func newAudioEngine() *AudioEngine {
 	e := &AudioEngine{selectedDevice: -1, asioDevice: -1, inputDevice: -1, inputASIODevice: -1, initializedDevices: make(map[int]bool)}
-	e.volumeBits.Store(math.Float32bits(0.82))
+	e.volumeBits.Store(math.Float32bits(defaultPlaybackVolume))
 	return e
 }
 
 func findProc(dll *syscall.DLL, name string) (*syscall.Proc, error) {
 	p, err := dll.FindProc(name)
 	if err != nil {
-		return nil, fmt.Errorf("缺少函数 %s: %w", name, err)
+		return nil, fmt.Errorf("Missing function %s: %w", name, err)
 	}
 	return p, nil
 }
@@ -289,12 +292,12 @@ func (e *AudioEngine) Load(runtimeDir string, hwnd uintptr) error {
 	asioPath := filepath.Join(runtimeDir, "bassasio.dll")
 	bass, err := syscall.LoadDLL(bassPath)
 	if err != nil {
-		return fmt.Errorf("无法加载 bass.dll: %w", err)
+		return fmt.Errorf("Could not load bass.dll: %w", err)
 	}
 	loud, err := syscall.LoadDLL(loudPath)
 	if err != nil {
 		bass.Release()
-		return fmt.Errorf("无法加载 bassloud.dll: %w", err)
+		return fmt.Errorf("Could not load bassloud.dll: %w", err)
 	}
 	e.bassDLL, e.loudDLL = bass, loud
 	// BASSASIO is optional for normal Windows output. When present, it adds
@@ -383,13 +386,13 @@ func (e *AudioEngine) Load(runtimeDir string, hwnd uintptr) error {
 	// Sound-design assets often begin with a full-level transient. Preserve that
 	// first transient while retaining BASS' ramp-out protection on pause/stop.
 	if ok, _, _ := e.pSetConfig.Call(BASS_CONFIG_NORAMP, 2); ok == 0 {
-		return fmt.Errorf("无法关闭播放启动淡入（BASS 错误 %d）", e.lastError())
+		return fmt.Errorf("Could not disable startup fade-in (BASS error %d)", e.lastError())
 	}
 
 	// Initialize the default output. BASS accepts -1 as the default device.
 	r, _, _ := e.pInit.Call(uintptr(^uint32(0)), 48000, 0, hwnd, 0)
 	if r == 0 {
-		return fmt.Errorf("音频设备初始化失败（BASS 错误 %d）", e.lastError())
+		return fmt.Errorf("Could not initialize audio device (BASS error %d)", e.lastError())
 	}
 	actual, _, _ := e.pGetDevice.Call()
 	e.selectedDevice = int(actual)
@@ -397,7 +400,7 @@ func (e *AudioEngine) Load(runtimeDir string, hwnd uintptr) error {
 	// Keep the Windows endpoint fed with silence between successive previews so
 	// USB/WASAPI devices do not sleep and lose the next sound's leading edge.
 	if ok, _, _ := e.pSetConfig.Call(BASS_CONFIG_DEV_NONSTOP, 1); ok == 0 {
-		return fmt.Errorf("无法保持输出设备活动（BASS 错误 %d）", e.lastError())
+		return fmt.Errorf("Could not keep the output active (BASS error %d)", e.lastError())
 	}
 
 	// Load mature format add-ons. A missing optional decoder is non-fatal.
@@ -548,7 +551,7 @@ func (e *AudioEngine) preparePlaybackStreamLocked(path string, loop bool) (prepa
 	p := utf16Ptr(path)
 	r, _, _ := e.pStreamCreateFile.Call(0, uintptr(unsafe.Pointer(p)), 0, 0, flags)
 	if r == 0 {
-		return prepared, fmt.Errorf("无法打开音频文件（BASS 错误 %d）", e.lastError())
+		return prepared, fmt.Errorf("Could not open audio file (BASS error %d)", e.lastError())
 	}
 	prepared.stream = uint32(r)
 	prepared.path = path
@@ -557,7 +560,7 @@ func (e *AudioEngine) preparePlaybackStreamLocked(path string, loop bool) (prepa
 	var info bassChannelInfo
 	if ok, _, _ := e.pChannelGetInfo.Call(uintptr(prepared.stream), uintptr(unsafe.Pointer(&info))); ok == 0 {
 		e.freePreparedStreamLocked(prepared)
-		return preparedPlaybackStream{}, fmt.Errorf("读取音频信息失败（BASS 错误 %d）", e.lastError())
+		return preparedPlaybackStream{}, fmt.Errorf("Could not read stream information (BASS error %d)", e.lastError())
 	}
 	prepared.sampleRate, prepared.channels = info.Freq, info.Chans
 	length, _, _ := e.pChannelGetLength.Call(uintptr(prepared.stream), BASS_POS_BYTE)
@@ -567,7 +570,7 @@ func (e *AudioEngine) preparePlaybackStreamLocked(path string, loop bool) (prepa
 		ar, _, _ := e.pStreamCreateFile.Call(0, uintptr(unsafe.Pointer(p)), 0, 0, flags)
 		if ar == 0 {
 			e.freePreparedStreamLocked(prepared)
-			return preparedPlaybackStream{}, fmt.Errorf("无法建立 ASIO 频谱分析流（BASS 错误 %d）", e.lastError())
+			return preparedPlaybackStream{}, fmt.Errorf("Could not create ASIO analysis stream (BASS error %d)", e.lastError())
 		}
 		prepared.analysisStream = uint32(ar)
 	}
@@ -579,7 +582,7 @@ func (e *AudioEngine) preparePlaybackStreamLocked(path string, loop bool) (prepa
 		globalPlaybackEndCallback, uintptr(prepared.generation),
 	); syncHandle == 0 {
 		e.freePreparedStreamLocked(prepared)
-		return preparedPlaybackStream{}, fmt.Errorf("无法监听播放结束事件（BASS 错误 %d）", e.lastError())
+		return preparedPlaybackStream{}, fmt.Errorf("Could not watch for end of playback (BASS error %d)", e.lastError())
 	}
 	return prepared, nil
 }
@@ -625,7 +628,7 @@ func (e *AudioEngine) attachCurrentProcessingLocked() {
 
 func (e *AudioEngine) initASIODriverLocked(index int) error {
 	if e.asioDLL == nil || e.pASIOInit == nil {
-		return errors.New("ASIO 组件不可用，请重新安装音频运行库")
+		return errors.New("ASIO unavailable. Reinstall the audio runtime.")
 	}
 	if e.asioInitialized && e.asioDevice == index {
 		return nil
@@ -638,7 +641,7 @@ func (e *AudioEngine) initASIODriverLocked(index int) error {
 	}
 	r, _, _ := e.pASIOInit.Call(uintptr(index), BASS_ASIO_ALLOUTPUTS)
 	if r == 0 {
-		return fmt.Errorf("无法初始化 ASIO 设备（BASSASIO 错误 %d）", e.lastASIOError())
+		return fmt.Errorf("Could not initialize ASIO device (BASSASIO error %d)", e.lastASIOError())
 	}
 	e.asioInitialized = true
 	e.asioDevice = index
@@ -649,14 +652,14 @@ func (e *AudioEngine) initASIODriverLocked(index int) error {
 
 func (e *AudioEngine) configureASIOStreamLocked() error {
 	if e.stream == 0 || !e.asioInitialized {
-		return errors.New("ASIO 输出尚未准备好")
+		return errors.New("ASIO output is not ready.")
 	}
 	if e.channels < 1 || e.channels > 2 {
-		return fmt.Errorf("ASIO 当前支持 Mono / Stereo 文件，该文件为 %d 声道", e.channels)
+		return fmt.Errorf("ASIO supports mono or stereo files; this file has %d channels.", e.channels)
 	}
 	r, _, _ := e.pASIOChannelEnableBASS.Call(0, 0, uintptr(e.stream), 1)
 	if r == 0 {
-		return fmt.Errorf("无法连接 ASIO 输出通道 1/2（BASSASIO 错误 %d）", e.lastASIOError())
+		return fmt.Errorf("Could not connect ASIO output channels 1/2 (BASSASIO error %d)", e.lastASIOError())
 	}
 	return nil
 }
@@ -733,7 +736,7 @@ func (e *AudioEngine) openStreamLocked(path string, loop bool) error {
 	p := utf16Ptr(path)
 	r, _, _ := e.pStreamCreateFile.Call(0, uintptr(unsafe.Pointer(p)), 0, 0, flags)
 	if r == 0 {
-		return fmt.Errorf("无法打开音频文件（BASS 错误 %d）", e.lastError())
+		return fmt.Errorf("Could not open audio file (BASS error %d)", e.lastError())
 	}
 	e.stream = uint32(r)
 	e.currentFile = path
@@ -743,7 +746,7 @@ func (e *AudioEngine) openStreamLocked(path string, loop bool) error {
 	ok, _, _ := e.pChannelGetInfo.Call(uintptr(e.stream), uintptr(unsafe.Pointer(&info)))
 	if ok == 0 {
 		e.freeStreamLocked()
-		return fmt.Errorf("读取音频信息失败（BASS 错误 %d）", e.lastError())
+		return fmt.Errorf("Could not read stream information (BASS error %d)", e.lastError())
 	}
 	e.sampleRate, e.channels = info.Freq, info.Chans
 	length, _, _ := e.pChannelGetLength.Call(uintptr(e.stream), BASS_POS_BYTE)
@@ -755,7 +758,7 @@ func (e *AudioEngine) openStreamLocked(path string, loop bool) error {
 		globalPlaybackEndCallback, uintptr(e.streamGeneration),
 	); syncHandle == 0 {
 		e.freeStreamLocked()
-		return fmt.Errorf("无法监听播放结束事件（BASS 错误 %d）", e.lastError())
+		return fmt.Errorf("Could not watch for end of playback (BASS error %d)", e.lastError())
 	}
 
 	if e.outputMode == OUTPUT_ASIO {
@@ -765,7 +768,7 @@ func (e *AudioEngine) openStreamLocked(path string, loop bool) error {
 		ar, _, _ := e.pStreamCreateFile.Call(0, uintptr(unsafe.Pointer(p)), 0, 0, flags)
 		if ar == 0 {
 			e.freeStreamLocked()
-			return fmt.Errorf("无法建立 ASIO 频谱分析流（BASS 错误 %d）", e.lastError())
+			return fmt.Errorf("Could not create ASIO analysis stream (BASS error %d)", e.lastError())
 		}
 		e.analysisStream = uint32(ar)
 	}
@@ -785,7 +788,7 @@ func (e *AudioEngine) openStreamLocked(path string, loop bool) error {
 		}
 	} else if r, _, _ := e.pChannelUpdate.Call(uintptr(e.stream), 0); r == 0 {
 		e.freeStreamLocked()
-		return fmt.Errorf("预缓冲音频失败（BASS 错误 %d）", e.lastError())
+		return fmt.Errorf("Audio prebuffer failed (BASS error %d)", e.lastError())
 	}
 	return nil
 }
@@ -794,7 +797,7 @@ func (e *AudioEngine) Open(path string, loop bool) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if !e.ready.Load() {
-		return errors.New("音频引擎尚未就绪")
+		return errors.New("The audio engine is not ready.")
 	}
 	e.freeStreamLocked()
 	e.resetMetersLocked()
@@ -808,7 +811,7 @@ func (e *AudioEngine) ReplaceAndPlay(path string, loop bool) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if !e.ready.Load() {
-		return errors.New("音频引擎尚未就绪")
+		return errors.New("The audio engine is not ready.")
 	}
 
 	prepared, err := e.preparePlaybackStreamLocked(path, loop)
@@ -850,10 +853,10 @@ func (e *AudioEngine) ReplaceAndPlay(path string, loop bool) error {
 		// Fill the channel buffer before replacing the previous stream. The END
 		// sync was installed first, so even very short files retain notification.
 		if r, _, _ := e.pChannelUpdate.Call(uintptr(e.stream), 0); r == 0 {
-			return rollback(fmt.Errorf("预缓冲音频失败（BASS 错误 %d）", e.lastError()))
+			return rollback(fmt.Errorf("Audio prebuffer failed (BASS error %d)", e.lastError()))
 		}
 		if r, _, _ := e.pChannelPlay.Call(uintptr(e.stream), 0); r == 0 {
-			return rollback(fmt.Errorf("播放失败（BASS 错误 %d）", e.lastError()))
+			return rollback(fmt.Errorf("Playback failed (BASS error %d)", e.lastError()))
 		}
 	}
 
@@ -865,7 +868,7 @@ func (e *AudioEngine) ReplaceAndPlay(path string, loop bool) error {
 
 func (e *AudioEngine) playASIOLocked() error {
 	if e.stream == 0 || !e.asioInitialized {
-		return errors.New("ASIO 输出尚未准备好")
+		return errors.New("ASIO output is not ready.")
 	}
 	state, _, _ := e.pChannelIsActive.Call(uintptr(e.stream))
 	if state == BASS_ACTIVE_STOPPED && e.totalBytes > 0 {
@@ -877,7 +880,7 @@ func (e *AudioEngine) playASIOLocked() error {
 	if !e.asioStarted {
 		r, _, _ := e.pASIOStart.Call(0, 0)
 		if r == 0 && e.lastASIOError() != BASS_ERROR_ALREADY {
-			return fmt.Errorf("启动 ASIO 输出失败（BASSASIO 错误 %d）", e.lastASIOError())
+			return fmt.Errorf("Could not start ASIO output (BASSASIO error %d)", e.lastASIOError())
 		}
 		e.asioStarted = true
 		e.asioPaused = false
@@ -886,7 +889,7 @@ func (e *AudioEngine) playASIOLocked() error {
 	if e.asioPaused {
 		r, _, _ := e.pASIOChannelReset.Call(0, uintptr(^uint32(0)), BASS_ASIO_RESET_PAUSE)
 		if r == 0 {
-			return fmt.Errorf("恢复 ASIO 输出失败（BASSASIO 错误 %d）", e.lastASIOError())
+			return fmt.Errorf("Could not resume ASIO output (BASSASIO error %d)", e.lastASIOError())
 		}
 		e.asioPaused = false
 	}
@@ -897,7 +900,7 @@ func (e *AudioEngine) PlayPause() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.stream == 0 {
-		return errors.New("请先打开音频文件")
+		return errors.New("Open an audio file first.")
 	}
 	if e.outputMode == OUTPUT_ASIO {
 		if e.asioStarted && !e.asioPaused {
@@ -905,7 +908,7 @@ func (e *AudioEngine) PlayPause() error {
 			if state == BASS_ACTIVE_PLAYING {
 				r, _, _ := e.pASIOChannelPause.Call(0, uintptr(^uint32(0)))
 				if r == 0 {
-					return fmt.Errorf("暂停 ASIO 输出失败（BASSASIO 错误 %d）", e.lastASIOError())
+					return fmt.Errorf("Could not pause ASIO output (BASSASIO error %d)", e.lastASIOError())
 				}
 				e.asioPaused = true
 				return nil
@@ -917,12 +920,12 @@ func (e *AudioEngine) PlayPause() error {
 	if state == BASS_ACTIVE_PLAYING || state == BASS_ACTIVE_STALLED {
 		r, _, _ := e.pChannelPause.Call(uintptr(e.stream))
 		if r == 0 {
-			return fmt.Errorf("暂停失败（BASS 错误 %d）", e.lastError())
+			return fmt.Errorf("Could not pause playback (BASS error %d)", e.lastError())
 		}
 	} else {
 		r, _, _ := e.pChannelPlay.Call(uintptr(e.stream), 0)
 		if r == 0 {
-			return fmt.Errorf("播放失败（BASS 错误 %d）", e.lastError())
+			return fmt.Errorf("Playback failed (BASS error %d)", e.lastError())
 		}
 	}
 	return nil
@@ -932,14 +935,14 @@ func (e *AudioEngine) Play() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.stream == 0 {
-		return errors.New("请先打开音频文件")
+		return errors.New("Open an audio file first.")
 	}
 	if e.outputMode == OUTPUT_ASIO {
 		return e.playASIOLocked()
 	}
 	r, _, _ := e.pChannelPlay.Call(uintptr(e.stream), 0)
 	if r == 0 {
-		return fmt.Errorf("播放失败（BASS 错误 %d）", e.lastError())
+		return fmt.Errorf("Playback failed (BASS error %d)", e.lastError())
 	}
 	return nil
 }
@@ -1085,8 +1088,8 @@ func (e *AudioEngine) SetVolume(v float32) {
 	if v < 0 {
 		v = 0
 	}
-	if v > 1.25 {
-		v = 1.25
+	if v > maxPlaybackVolume {
+		v = maxPlaybackVolume
 	}
 	e.volumeBits.Store(math.Float32bits(v))
 }
@@ -1451,7 +1454,7 @@ func (e *AudioEngine) StartSystemInput(index int) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.pRecordInit == nil || e.pRecordStart == nil {
-		return errors.New("录音输入组件不可用")
+		return errors.New("Recording input unavailable.")
 	}
 	e.stopInputLocked(false)
 	restore := func() {
@@ -1462,7 +1465,7 @@ func (e *AudioEngine) StartSystemInput(index int) error {
 	r, _, _ := e.pRecordInit.Call(uintptr(index))
 	if r == 0 {
 		restore()
-		return fmt.Errorf("无法初始化输入设备（BASS 错误 %d）", e.lastError())
+		return fmt.Errorf("Could not initialize input device (BASS error %d)", e.lastError())
 	}
 	try := [][2]uint32{{48000, 2}, {44100, 2}, {48000, 1}, {44100, 1}}
 	var handle uintptr
@@ -1476,7 +1479,7 @@ func (e *AudioEngine) StartSystemInput(index int) error {
 	if handle == 0 {
 		e.pRecordFree.Call()
 		restore()
-		return fmt.Errorf("无法启动输入监测（BASS 错误 %d）", e.lastError())
+		return fmt.Errorf("Could not start input monitoring (BASS error %d)", e.lastError())
 	}
 	e.inputMode = INPUT_SYSTEM
 	e.inputDevice = index
@@ -1492,10 +1495,10 @@ func (e *AudioEngine) StartASIOInput(index int) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.asioDLL == nil || e.pASIOChannelEnableBASS == nil || e.pStreamCreate == nil {
-		return errors.New("ASIO 输入组件不可用")
+		return errors.New("ASIO input unavailable.")
 	}
 	if e.outputMode == OUTPUT_ASIO && e.asioInitialized && e.asioDevice != index {
-		return errors.New("ASIO 输入与 ASIO 输出同时使用时，请选择同一个 ASIO 驱动")
+		return errors.New("Use the same ASIO driver for simultaneous input and output.")
 	}
 	e.stopInputLocked(false)
 	restore := func() {
@@ -1506,7 +1509,7 @@ func (e *AudioEngine) StartASIOInput(index int) error {
 	if e.outputMode == OUTPUT_ASIO {
 		if !e.asioInitialized || e.asioDevice != index {
 			restore()
-			return errors.New("当前 ASIO 输出驱动尚未初始化")
+			return errors.New("The current ASIO output driver is not initialized.")
 		}
 	} else {
 		if err := e.initASIODriverLocked(index); err != nil {
@@ -1533,7 +1536,7 @@ func (e *AudioEngine) StartASIOInput(index int) error {
 			e.freeASIODriverLocked()
 		}
 		restore()
-		return fmt.Errorf("无法建立 ASIO 输入分析流（BASS 错误 %d）", e.lastError())
+		return fmt.Errorf("Could not create ASIO input analysis stream (BASS error %d)", e.lastError())
 	}
 	if e.pASIOChannelReset != nil {
 		e.pASIOChannelReset.Call(1, uintptr(^uint32(0)), BASS_ASIO_RESET_ENABLE|BASS_ASIO_RESET_JOIN)
@@ -1555,7 +1558,7 @@ func (e *AudioEngine) StartASIOInput(index int) error {
 			e.freeASIODriverLocked()
 		}
 		restore()
-		return fmt.Errorf("无法连接 ASIO 输入通道（BASSASIO 错误 %d）", e.lastASIOError())
+		return fmt.Errorf("Could not connect ASIO input channels (BASSASIO error %d)", e.lastASIOError())
 	}
 	if !e.asioStarted {
 		r, _, _ = e.pASIOStart.Call(0, 0)
@@ -1566,7 +1569,7 @@ func (e *AudioEngine) StartASIOInput(index int) error {
 				e.freeASIODriverLocked()
 			}
 			restore()
-			return fmt.Errorf("启动 ASIO 输入失败（BASSASIO 错误 %d）", e.lastASIOError())
+			return fmt.Errorf("Could not start ASIO input (BASSASIO error %d)", e.lastASIOError())
 		}
 		e.asioStarted = true
 	}
@@ -1617,7 +1620,7 @@ func cString(ptr uintptr) string {
 	}
 	s := string(b)
 	if strings.TrimSpace(s) == "" {
-		return "未命名设备"
+		return "Unnamed device"
 	}
 	return s
 }
@@ -1635,7 +1638,7 @@ func wideCString(ptr uintptr) string {
 		u = append(u, c)
 	}
 	if len(u) == 0 {
-		return "未命名 ASIO 设备"
+		return "Unnamed ASIO device"
 	}
 	return syscall.UTF16ToString(u)
 }
@@ -1696,7 +1699,7 @@ func (e *AudioEngine) restoreStreamLocked(path string, loop bool, pos float64, p
 		}
 		r, _, _ := e.pChannelPlay.Call(uintptr(e.stream), 0)
 		if r == 0 {
-			return fmt.Errorf("恢复播放失败（BASS 错误 %d）", e.lastError())
+			return fmt.Errorf("Could not resume playback (BASS error %d)", e.lastError())
 		}
 	}
 	return nil
@@ -1706,15 +1709,15 @@ func (e *AudioEngine) ensureSystemDeviceLocked(index int) error {
 	if !e.initializedDevices[index] {
 		r, _, _ := e.pInit.Call(uintptr(index), 48000, 0, e.hwnd, 0)
 		if r == 0 && e.lastError() != BASS_ERROR_ALREADY {
-			return fmt.Errorf("无法初始化输出设备（BASS 错误 %d）", e.lastError())
+			return fmt.Errorf("Could not initialize output device (BASS error %d)", e.lastError())
 		}
 		e.initializedDevices[index] = true
 	}
 	if r, _, _ := e.pSetDevice.Call(uintptr(index)); r == 0 {
-		return fmt.Errorf("无法选择输出设备（BASS 错误 %d）", e.lastError())
+		return fmt.Errorf("Could not select output device (BASS error %d)", e.lastError())
 	}
 	if r, _, _ := e.pSetConfig.Call(BASS_CONFIG_DEV_NONSTOP, 1); r == 0 {
-		return fmt.Errorf("无法保持输出设备活动（BASS 错误 %d）", e.lastError())
+		return fmt.Errorf("Could not keep the output active (BASS error %d)", e.lastError())
 	}
 	return nil
 }
@@ -1732,7 +1735,7 @@ func (e *AudioEngine) SwitchDevice(index int) error {
 		if e.stream != 0 {
 			r, _, _ := e.pChannelSetDevice.Call(uintptr(e.stream), uintptr(index))
 			if r == 0 {
-				return fmt.Errorf("无法切换输出设备（BASS 错误 %d）", e.lastError())
+				return fmt.Errorf("Could not switch output device (BASS error %d)", e.lastError())
 			}
 		}
 		e.selectedDevice = index
@@ -1759,7 +1762,7 @@ func (e *AudioEngine) SwitchASIODevice(index int) error {
 		e.stopInputLocked(false)
 	}
 	if e.asioDLL == nil {
-		return errors.New("ASIO 组件不可用，请重新安装音频运行库")
+		return errors.New("ASIO unavailable. Reinstall the audio runtime.")
 	}
 	if e.outputMode == OUTPUT_ASIO && e.asioInitialized && e.asioDevice == index {
 		return nil
@@ -1815,13 +1818,13 @@ func (e *AudioEngine) ASIOControlPanel() error {
 		e.stopInputLocked(false)
 	}
 	if e.outputMode != OUTPUT_ASIO || !e.asioInitialized || e.pASIOControlPanel == nil {
-		return errors.New("请先选择一个 ASIO 设备")
+		return errors.New("Select an ASIO device first.")
 	}
 	path, loop, pos, wasPlaying := e.currentFile, e.currentLoop, e.positionSecondsLocked(), e.isPlayingLocked()
 	device := e.asioDevice
 	r, _, _ := e.pASIOControlPanel.Call()
 	if r == 0 {
-		return fmt.Errorf("无法打开 ASIO 控制面板（BASSASIO 错误 %d）", e.lastASIOError())
+		return fmt.Errorf("Could not open ASIO control panel (BASSASIO error %d)", e.lastASIOError())
 	}
 	// Drivers commonly apply buffer/rate changes after reinitialization. Reopen
 	// the selected driver and restore the transport when the panel closes.
@@ -1831,7 +1834,7 @@ func (e *AudioEngine) ASIOControlPanel() error {
 		e.outputMode = OUTPUT_SYSTEM
 		e.pSetDevice.Call(uintptr(e.selectedDevice))
 		_ = e.restoreStreamLocked(path, loop, pos, wasPlaying)
-		return fmt.Errorf("ASIO 设置已更改，但重新初始化失败：%w", err)
+		return fmt.Errorf("ASIO settings changed but reinitialization failed: %w", err)
 	}
 	e.outputMode = OUTPUT_ASIO
 	return e.restoreStreamLocked(path, loop, pos, wasPlaying)
@@ -1851,7 +1854,7 @@ func (e *AudioEngine) GenerateTrackVisuals(path string, bins int, progress func(
 	flags := uintptr(BASS_SAMPLE_FLOAT | BASS_STREAM_DECODE | BASS_STREAM_PRESCAN | BASS_UNICODE)
 	r, _, _ := e.pStreamCreateFile.Call(0, uintptr(unsafe.Pointer(p)), 0, 0, flags)
 	if r == 0 {
-		return WaveformData{}, SpectrogramData{}, fmt.Errorf("波形解码失败（BASS 错误 %d）", e.lastError())
+		return WaveformData{}, SpectrogramData{}, fmt.Errorf("Waveform decoding failed (BASS error %d)", e.lastError())
 	}
 	stream := uint32(r)
 	defer e.pStreamFree.Call(uintptr(stream))
@@ -1864,7 +1867,7 @@ func (e *AudioEngine) GenerateTrackVisuals(path string, bins int, progress func(
 	l, _, _ := e.pChannelGetLength.Call(uintptr(stream), BASS_POS_BYTE)
 	totalFrames := uint64(l) / uint64(maxi(chans, 1)*4)
 	if totalFrames == 0 || totalFrames > 1<<60 {
-		return WaveformData{}, SpectrogramData{}, errors.New("无法读取音频长度")
+		return WaveformData{}, SpectrogramData{}, errors.New("Could not read audio duration.")
 	}
 	per := (totalFrames + uint64(bins) - 1) / uint64(bins)
 	points := make([]WavePoint, bins)
@@ -1933,6 +1936,9 @@ func (e *AudioEngine) GenerateWaveform(path string, bins int, progress func(floa
 	waveform, _, err := e.GenerateTrackVisuals(path, bins, progress)
 	return waveform, err
 }
+
+func nearFullScale(lo, hi float32) bool { return hi >= 0.999 || lo <= -0.999 }
+func sampleOver(s float32) bool         { return s > 1 || s < -1 }
 
 func atomicMaxFloat(dst *atomic.Uint32, v float32) {
 	for {
@@ -2045,11 +2051,7 @@ func audioDSPProc(hDSP, channel, buffer, length, user uintptr) uintptr {
 		frames++
 		for c := 0; c < chans && base+c < n; c++ {
 			raw := samples[base+c]
-			a := raw
-			if a < 0 {
-				a = -a
-			}
-			if a > 1 {
+			if sampleOver(raw) {
 				clips++
 			}
 			if applyVolume {

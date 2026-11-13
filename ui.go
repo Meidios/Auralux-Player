@@ -499,6 +499,9 @@ func (a *App) calculateLayout(c RECT) Layout {
 	l.SpectrogramRangeBtn = makeRect(l.SpectrogramFreezeBtn.Left-78, controlY, 72, 20)
 	l.SpectrogramTimeBtn = makeRect(l.SpectrogramRangeBtn.Left-70, controlY, 64, 20)
 	l.SpectrogramScaleBtn = makeRect(l.SpectrogramTimeBtn.Left-80, controlY, 74, 20)
+	if a.analyzerView == analyzerViewLiveSpectrogram {
+		l.SpectrumFFTBtn = makeRect(l.SpectrogramScaleBtn.Left-60, controlY, 54, 20)
+	}
 	modeW, styleW, normalizeW := int32(64), int32(50), int32(68)
 	if rectW(l.Stereo) < 290 {
 		modeW, styleW, normalizeW = 56, 44, 50
@@ -513,14 +516,22 @@ func (a *App) calculateLayout(c RECT) Layout {
 	return l
 }
 
+func logoMenuRect(header RECT) RECT {
+	return makeRect(header.Left+7, header.Top+9, 40, 40)
+}
+
 func (a *App) drawHeader(dc uintptr) {
 	r := a.layout.Header
 	fill(dc, r, cHeader)
 	line(dc, r.Left, r.Bottom-1, r.Right, r.Bottom-1, cBorder, 1)
 	line(dc, r.Right-1, r.Top, r.Right-1, r.Bottom, cBorder, 1)
 
-	brandIcon := makeRect(r.Left+12, r.Top+14, 30, 30)
-	drawUIAsset(dc, a.uiImages, "brand_wave", brandIcon)
+	logo := logoMenuRect(r)
+	if pointInRect(a.hover.X, a.hover.Y, logo) {
+		fillRound(dc, logo, 8, cPanel2)
+		strokeRound(dc, logo, 8, cAccent2, 1)
+	}
+	drawUIAsset(dc, a.uiImages, "brand_wave", inflateRect(logo, -5, -5))
 
 	th := a.layout.ThemeBtn
 	compact := rectW(r) < 250
@@ -671,7 +682,7 @@ func (a *App) drawPlaylistDropdown(dc uintptr) {
 		if active || hovered {
 			color = cText
 		}
-		text(dc, a.playlists[index].Name, makeRect(r.Left+22, r.Top, rectW(r)-30, rectH(r)), a.fontSmall, color, DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS)
+		text(dc, playlistDisplayName(a.playlists[index]), makeRect(r.Left+22, r.Top, rectW(r)-30, rectH(r)), a.fontSmall, color, DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS)
 	}
 	if a.playlistMenuScroll > 0 {
 		drawUIAsset(dc, a.uiImages, "scroll_up", makeRect(geometry.Rect.Right-24, geometry.ListTop+3, 14, 14))
@@ -699,9 +710,9 @@ func (a *App) drawPlaylistDropdown(dc uintptr) {
 		text(dc, label, makeRect(r.Left+12, r.Top, rectW(r)-24, rectH(r)), a.fontSmall, color, DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS)
 	}
 	custom := a.activePlaylistID != defaultPlaylistID
-	drawAction(geometry.AddAudio, "添加音频…", true, false)
-	drawAction(geometry.Rename, "重命名当前 Playlist…", custom, false)
-	drawAction(geometry.Delete, "删除当前 Playlist…", custom, true)
+	drawAction(geometry.AddAudio, tr("添加音频…"), true, false)
+	drawAction(geometry.Rename, tr("重命名当前 Playlist…"), custom, false)
+	drawAction(geometry.Delete, tr("删除当前 Playlist…"), custom, true)
 }
 
 func (a *App) drawPlaylistPanel(dc uintptr) {
@@ -714,8 +725,8 @@ func (a *App) drawPlaylistPanel(dc uintptr) {
 	if pointInRect(a.hover.X, a.hover.Y, selector) {
 		fillRound(dc, selector, 6, cPanel2)
 	}
-	name := "PLAYLIST"
-	if p != nil {
+	name := "Default playlist"
+	if p != nil && p.ID != defaultPlaylistID {
 		name = p.Name
 	}
 	text(dc, name, RECT{selector.Left + 6, selector.Top, selector.Right - 22, selector.Bottom}, a.fontSection, cMuted, DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS)
@@ -741,7 +752,7 @@ func (a *App) drawPlaylistPanel(dc uintptr) {
 	top, bottom := a.playlistListBounds()
 	visible := a.playlistVisibleRows()
 	if p == nil || len(p.Tracks) == 0 {
-		text(dc, "暂无音频\n拖入文件，或从 Playlist 菜单添加", RECT{r.Left + 18, top, r.Right - 18, bottom}, a.fontBody, cFaint, DT_CENTER|DT_VCENTER)
+		text(dc, "No audio yet\nDrop files here or add audio from the playlist menu.", RECT{r.Left + 18, top, r.Right - 18, bottom}, a.fontBody, cFaint, DT_CENTER|DT_VCENTER)
 	} else {
 		selection := make(map[int]bool, 1)
 		for _, selectedIdx := range a.selectedRows() {
@@ -841,8 +852,8 @@ func (a *App) drawFileInfoPanel(dc uintptr) {
 
 	track, currentLoaded := a.selectedFileInfoTrack()
 	if track == nil {
-		text(dc, "当前没有已载入文件", makeRect(r.Left+18, r.Top+52, rectW(r)-36, 20), a.fontBody, cFaint, DT_LEFT|DT_VCENTER|DT_SINGLELINE)
-		text(dc, "选择或播放音频后，这里会显示详细信息。", makeRect(r.Left+18, r.Top+76, rectW(r)-36, 18), a.fontTiny, cFaint, DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS)
+		text(dc, "No file loaded", makeRect(r.Left+18, r.Top+52, rectW(r)-36, 20), a.fontBody, cFaint, DT_LEFT|DT_VCENTER|DT_SINGLELINE)
+		text(dc, "Select or play a file to see its details.", makeRect(r.Left+18, r.Top+76, rectW(r)-36, 18), a.fontTiny, cFaint, DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS)
 		return
 	}
 	t := *track
@@ -1218,12 +1229,16 @@ func drawHistoryLoopMarkers(dc uintptr, plot RECT, markers []float64, start, end
 		return
 	}
 	span := end - start
-	lastLabelX := int32(-1000)
+	lastLineX, lastLabelX := int32(-1000), int32(-1000)
 	for _, t := range markers {
 		if t < start || t > end {
 			continue
 		}
 		x := plot.Left + int32((t-start)/span*float64(rectW(plot)-1))
+		if x-lastLineX < 3 {
+			continue
+		}
+		lastLineX = x
 		drawDashedVerticalLine(dc, x, plot.Top+2, plot.Bottom-2, cFaint)
 		if x-lastLabelX >= 42 {
 			text(dc, "LOOP", makeRect(x+4, plot.Top+3, 34, 12), font, cFaint, DT_LEFT|DT_VCENTER|DT_SINGLELINE)
@@ -1533,7 +1548,7 @@ func (a *App) drawWavePanel(dc uintptr) {
 
 	if len(pts) == 0 {
 		if loading {
-			text(dc, fmt.Sprintf("正在生成高精度波形… %d%%", int(progress*100)), plot, a.fontTiny, cMuted, DT_CENTER|DT_VCENTER|DT_SINGLELINE)
+			text(dc, fmt.Sprintf("Generating waveform… %d%%", int(progress*100)), plot, a.fontTiny, cMuted, DT_CENTER|DT_VCENTER|DT_SINGLELINE)
 		}
 		return
 	}
@@ -1653,7 +1668,7 @@ func (a *App) drawWavePanel(dc uintptr) {
 	clipVisible := 0
 	for i := visibleStart; i <= visibleEnd; i++ {
 		p := pts[i]
-		if p.MaxL >= 0.999 || p.MinL <= -0.999 || p.MaxR >= 0.999 || p.MinR <= -0.999 {
+		if nearFullScale(p.MinL, p.MaxL) || nearFullScale(p.MinR, p.MaxR) {
 			clipVisible++
 		}
 	}
@@ -1687,7 +1702,7 @@ func (a *App) drawWavePanel(dc uintptr) {
 			if brush == 0 {
 				brush = grayBrush
 			}
-			if rawMax >= 0.999 || rawMin <= -0.999 {
+			if nearFullScale(rawMin, rawMax) {
 				brush = redBrush
 			}
 			y1 := mid - int32(mx*height)
@@ -1720,7 +1735,7 @@ func (a *App) drawWavePanel(dc uintptr) {
 		local0 := float64(px) / float64(clipW)
 		local1 := float64(px+1) / float64(clipW)
 		p := waveRangeAt(local0, local1)
-		if p.MaxL >= 0.999 || p.MinL <= -0.999 || p.MaxR >= 0.999 || p.MinR <= -0.999 {
+		if nearFullScale(p.MinL, p.MaxL) || nearFullScale(p.MinR, p.MaxR) {
 			line(dc, x, plot.Top+1, x, plot.Top+6, cDanger, 1)
 		}
 	}
@@ -1758,10 +1773,10 @@ func (a *App) drawWavePanel(dc uintptr) {
 		text(dc, "CACHED", makeRect(plot.Right-66, plot.Bottom-20, 58, 16), a.fontTiny, cFaint, DT_RIGHT|DT_VCENTER|DT_SINGLELINE)
 	}
 	if clipVisible > 0 {
-		box := makeRect(plot.Right-112, plot.Bottom-42, 104, 18)
+		box := makeRect(plot.Right-144, plot.Bottom-42, 136, 18)
 		fillRound(dc, box, 4, cSurfaceRaised)
 		strokeRound(dc, box, 4, cDanger, 1)
-		text(dc, fmt.Sprintf("CLIP MARKERS %d", clipVisible), box, a.fontTiny, cDanger, DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS)
+		text(dc, fmt.Sprintf("NEAR FS BINS %d", clipVisible), box, a.fontTiny, cDanger, DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS)
 	}
 
 	if pointInRect(a.hover.X, a.hover.Y, plot) {
@@ -2289,8 +2304,8 @@ func (a *App) drawMeterPanel(dc uintptr) {
 	if a.clips > 0 {
 		clipCol = cDanger
 	}
-	text(dc, "CLIP", makeRect(clipR.Left+10, clipR.Top, 50, rectH(clipR)), a.fontTiny, clipCol, DT_LEFT|DT_VCENTER|DT_SINGLELINE)
-	text(dc, fmt.Sprintf("%d", a.clips), makeRect(clipR.Left+60, clipR.Top, rectW(clipR)-70, rectH(clipR)), a.fontSection, cText, DT_CENTER|DT_VCENTER|DT_SINGLELINE)
+	text(dc, "SAMPLE OVERS", makeRect(clipR.Left+10, clipR.Top, rectW(clipR)*3/5-10, rectH(clipR)), a.fontTiny, clipCol, DT_LEFT|DT_VCENTER|DT_SINGLELINE)
+	text(dc, fmt.Sprintf("%d", a.clips), makeRect(clipR.Left+rectW(clipR)*3/5, clipR.Top, rectW(clipR)*2/5-10, rectH(clipR)), a.fontSection, cText, DT_CENTER|DT_VCENTER|DT_SINGLELINE)
 }
 
 func (a *App) drawStereoPanel(dc uintptr) {
@@ -2778,7 +2793,7 @@ func (a *App) drawControls(dc uintptr) {
 	thumb := makeRect(18, r.Top+35, 48, 48)
 	fillRound(dc, thumb, 4, cBlueDark)
 	a.drawMiniWave(dc, thumb)
-	title := "未打开音频"
+	title := "No audio open"
 	meta := "—"
 	if p := a.playbackPlaylist(); p != nil && a.current >= 0 && a.current < len(p.Tracks) {
 		t := p.Tracks[a.current]

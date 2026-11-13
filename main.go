@@ -13,13 +13,16 @@ import (
 )
 
 const (
-	appTitle       = "Auralux Player 1.5.79"
-	windowClass    = "AuraluxNativeAudioPlayer"
-	msgEngineReady = WM_APP + 1
-	msgWaveReady   = WM_APP + 2
-	msgStatus      = WM_APP + 3
-	msgRenderTick  = WM_APP + 4
-	msgPlaybackEnd = WM_APP + 5
+	appTitle          = "Auralux Player " + appVersion
+	windowClass       = "AuraluxNativeAudioPlayer"
+	msgEngineReady    = WM_APP + 1
+	msgWaveReady      = WM_APP + 2
+	msgStatus         = WM_APP + 3
+	msgRenderTick     = WM_APP + 4
+	msgPlaybackEnd    = WM_APP + 5
+	msgUpdateEvent    = WM_APP + 6
+	msgUpdateProgress = WM_APP + 7
+	msgUpdateStartup  = WM_APP + 8
 )
 
 // A link-time override lets isolated QA builds run beside the installed player.
@@ -60,6 +63,7 @@ func main() {
 		return
 	}
 
+	loadLanguage(stateConfigDir(), windowsDisplayLanguage())
 	app := NewApp()
 	// OLE drag and drop is what lets a playlist row be dragged out to Explorer;
 	// without it the player still runs, the export gestures just report that the
@@ -120,12 +124,18 @@ func main() {
 	procShowWindow.Call(hwnd, showCmd)
 	procUpdateWindow.Call(hwnd)
 	app.startEngineSetup()
+	postMessage(hwnd, msgUpdateStartup, 0, 0)
 
 	var msg MSG
 	for {
 		r, _, _ := procGetMessageW.Call(uintptr(unsafe.Pointer(&msg)), 0, 0, 0)
 		if int32(r) <= 0 {
 			break
+		}
+		if app.help.hwnd != 0 {
+			if handled, _, _ := procIsDialogMessage.Call(app.help.hwnd, uintptr(unsafe.Pointer(&msg))); handled != 0 {
+				continue
+			}
 		}
 		procTranslateMessage.Call(uintptr(unsafe.Pointer(&msg)))
 		procDispatchMessageW.Call(uintptr(unsafe.Pointer(&msg)))

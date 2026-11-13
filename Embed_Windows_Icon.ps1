@@ -54,7 +54,22 @@ public static class AuraluxIconResourceWriter
         public byte[] Data;
     }
 
-    public static void Write(string exePath, string iconPath)
+    // Fixed VERSIONINFO lets Explorer and a later installer identify this binary.
+    private static byte[] VersionResource(Version v)
+    {
+        using (MemoryStream stream = new MemoryStream())
+        using (BinaryWriter w = new BinaryWriter(stream))
+        {
+            w.Write((ushort)92); w.Write((ushort)52); w.Write((ushort)0);
+            w.Write(System.Text.Encoding.Unicode.GetBytes("VS_VERSION_INFO\0"));
+            while ((stream.Position & 3) != 0) w.Write((byte)0);
+            uint ms = ((uint)v.Major << 16) | (uint)v.Minor, ls = (uint)v.Build << 16;
+            foreach (uint x in new uint[] { 0xFEEF04BD, 0x10000, ms, ls, ms, ls, 0x3f, 0, 0x40004, 1, 0, 0, 0 }) w.Write(x);
+            return stream.ToArray();
+        }
+    }
+
+    public static void Write(string exePath, string iconPath, string version)
     {
         IconImage[] images = ReadIcon(iconPath);
         IntPtr update = BeginUpdateResourceW(exePath, false);
@@ -77,6 +92,9 @@ public static class AuraluxIconResourceWriter
                 group, (uint)group.Length))
                 throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not write the application icon group resource");
 
+            byte[] info = VersionResource(new Version(version));
+            if (!UpdateResourceW(update, ResourceId(16), ResourceId(1), 0, info, (uint)info.Length))
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not write application version");
             if (!EndUpdateResourceW(update, false))
                 throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not commit EXE icon resources");
             committed = true;
@@ -151,5 +169,6 @@ public static class AuraluxIconResourceWriter
 
 $resolvedExe = (Resolve-Path -LiteralPath $ExePath).Path
 $resolvedIcon = (Resolve-Path -LiteralPath $IconPath).Path
-[AuraluxIconResourceWriter]::Write($resolvedExe, $resolvedIcon)
+$version = [regex]::Match((Get-Content (Join-Path $PSScriptRoot 'update.go') -Raw), '(?m)^const appVersion = "(\d+\.\d+\.\d+)"').Groups[1].Value
+[AuraluxIconResourceWriter]::Write($resolvedExe, $resolvedIcon, $version)
 Write-Host "Embedded application icon: $resolvedIcon"

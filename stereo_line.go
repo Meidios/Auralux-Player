@@ -33,7 +33,7 @@ const (
 	// Keep the GONIO/LISSA LINE coordinate scale aligned with DOT and RAY.
 	// The shared 0.82 layout margin and the soft radial knee below still keep
 	// full-scale excursions inside the outer reference circle.
-	stereoPhosphorArcBudget       = float32(12.0)
+	stereoPhosphorArcBudget         = float32(12.0)
 	stereoPhosphorBaseAlpha         = float32(0.08)
 	stereoPhosphorMinSpacing        = float32(2.5)
 	stereoPhosphorMaxSpacing        = float32(4.5)
@@ -172,6 +172,7 @@ type stereoPhosphorDotCandidate struct {
 }
 
 type stereoPhosphorState struct {
+	diffuseDots       bool
 	width, height     int
 	energyLayers      [2][]float32
 	coverageLayers    [2][]float32
@@ -1122,6 +1123,11 @@ func (s *stereoPhosphorState) flushDotBins() int {
 		center := stereoPhosphorPoint{X: bin.SumX / float32(bin.Hits), Y: bin.SumY / float32(bin.Hits)}
 		seed := bin.Seed ^ stereoPhosphorMixSequence(s.dotDisplayFrame+uint64(candidate.Index)+1)
 		offset, radius, energy := stereoPhosphorDotParticle(seed, s.width, s.height, bin.Hits, false)
+		if !s.diffuseDots {
+			offset.X *= 0.32
+			offset.Y *= 0.32
+			radius *= 0.86
+		}
 		freshness := stereoPhosphorClamp(bin.Freshness, 0, 1)
 		s.splatDotParticle(
 			stereoPhosphorPoint{X: center.X + offset.X, Y: center.Y + offset.Y},
@@ -1142,6 +1148,11 @@ func (s *stereoPhosphorState) flushDotBins() int {
 		center := stereoPhosphorPoint{X: bin.SumX / float32(bin.Hits), Y: bin.SumY / float32(bin.Hits)}
 		seed := bin.Seed ^ stereoPhosphorMixSequence(s.dotDisplayFrame+uint64(candidate.Index)+0x9e3779b9)
 		offset, radius, energy := stereoPhosphorDotParticle(seed, s.width, s.height, bin.Hits, true)
+		if !s.diffuseDots {
+			offset.X *= 0.32
+			offset.Y *= 0.32
+			radius *= 0.86
+		}
 		freshness := stereoPhosphorClamp(bin.Freshness*0.78, 0, 1)
 		s.splatDotParticle(
 			stereoPhosphorPoint{X: center.X + offset.X, Y: center.Y + offset.Y},

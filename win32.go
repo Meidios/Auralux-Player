@@ -447,9 +447,12 @@ func setWindowText(hwnd uintptr, s string) {
 	procSetWindowTextW.Call(hwnd, uintptr(unsafe.Pointer(utf16Ptr(s))))
 }
 func messageBox(hwnd uintptr, text, title string, flags uint32) {
-	procMessageBoxW.Call(hwnd, uintptr(unsafe.Pointer(utf16Ptr(text))), uintptr(unsafe.Pointer(utf16Ptr(title))), uintptr(flags))
+	messageBoxResult(hwnd, text, title, flags)
 }
 func messageBoxResult(hwnd uintptr, text, title string, flags uint32) uintptr {
+	if theApp != nil {
+		return themedNotice(hwnd, text, title, flags)
+	}
 	r, _, _ := procMessageBoxW.Call(hwnd, uintptr(unsafe.Pointer(utf16Ptr(text))), uintptr(unsafe.Pointer(utf16Ptr(title))), uintptr(flags))
 	return r
 }

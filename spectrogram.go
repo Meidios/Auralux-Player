@@ -765,18 +765,27 @@ func (s *spectrogramSurface) renderLive(state *liveSpectrogramState, seconds flo
 	}
 	start, count, _, last := state.visibleRange(seconds)
 	s.prepareRowBands(scale, minFreq, maxFreq, dataMaxFreq, spectrogramBandCount)
+	// A pixel is a time interval. Keep the strongest measurement in it, and
+	// hold the previous measurement between frames rather than anticipating
+	// the next attack. Include the newest frame at the right edge.
+	next := start
 	for x := 0; x < s.width; x++ {
-		target := last - seconds + (float64(x)+0.5)/float64(s.width)*seconds
-		left, right, fraction, ok := state.sampleColumnsAtTime(target, start, count)
+		edge := last - seconds + float64(x+1)/float64(s.width)*seconds
+		if x == s.width-1 {
+			edge = last
+		}
+		first := next
+		for next < start+count && state.times[state.chronologicalIndex(next)] <= edge {
+			next++
+		}
+		if first == next && first > start {
+			first--
+		}
 		for y := 0; y < s.height; y++ {
 			v := 0.0
-			if ok {
-				bandPosition := s.rowBands[y]
-				v = sampleSpectrogramBandSpan(state.values[:], left*spectrogramBandCount, spectrogramBandCount, bandPosition, s.rowBandLow[y], s.rowBandHigh[y])
-				if left != right {
-					next := sampleSpectrogramBandSpan(state.values[:], right*spectrogramBandCount, spectrogramBandCount, bandPosition, s.rowBandLow[y], s.rowBandHigh[y])
-					v += (next - v) * fraction
-				}
+			for i := first; i < next; i++ {
+				base := state.chronologicalIndex(i) * spectrogramBandCount
+				v = max(v, sampleSpectrogramBandSpan(state.values[:], base, spectrogramBandCount, s.rowBands[y], s.rowBandLow[y], s.rowBandHigh[y]))
 			}
 			s.put(y*s.width+x, s.palette[remapSpectrogramSample(v, rangeDB)])
 		}

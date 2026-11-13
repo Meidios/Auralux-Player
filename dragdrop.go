@@ -492,7 +492,7 @@ func doDragDropFiles(paths []string) uint32 {
 func copyFilesToClipboard(hwnd uintptr, paths []string) error {
 	data := dropFilesBytes(paths)
 	if len(data) == 0 {
-		return errors.New("没有可复制的文件")
+		return errors.New("No files to copy.")
 	}
 	for attempt := 0; attempt < 3; attempt++ {
 		opened, _, _ := procOpenClipboard.Call(hwnd)
@@ -504,15 +504,15 @@ func copyFilesToClipboard(hwnd uintptr, paths []string) error {
 		handle := buildHDROPHandle(data)
 		if handle == 0 {
 			procCloseClipboard.Call()
-			return errors.New("无法分配剪贴板数据")
+			return errors.New("Could not allocate clipboard data.")
 		}
 		if stored, _, _ := procSetClipboardData.Call(CF_HDROP, handle); stored == 0 {
 			procCloseClipboard.Call()
 			procGlobalFree.Call(handle)
-			return errors.New("剪贴板被其他程序占用")
+			return errors.New("The clipboard is in use by another program.")
 		}
 		procCloseClipboard.Call()
 		return nil
 	}
-	return errors.New("剪贴板被其他程序占用")
+	return errors.New("The clipboard is in use by another program.")
 }
